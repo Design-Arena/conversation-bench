@@ -1,6 +1,6 @@
-# Audio Arena — Hard Static Benchmark
+# Audio Arena
 
-This is the **hard static benchmark** used by [Audio Arena](https://audioarena.ai), a project by [Arcada Labs](https://arcada.dev) for evaluating voice AI models.
+A rigorous, multi-turn evaluation benchmark for voice AI models. Built by [Arcada Labs](https://arcada.dev) and used to power the [Audio Arena](https://audioarena.ai) leaderboard.
 
 - **Leaderboard & results**: [audioarena.ai](https://audioarena.ai)
 - **Dataset on Hugging Face**: [arcada-labs/audio-arena](https://huggingface.co/datasets/arcada-labs/audio-arena)
@@ -8,13 +8,13 @@ This is the **hard static benchmark** used by [Audio Arena](https://audioarena.a
 
 ## Background
 
-This benchmark builds on the original [30-turn multi-turn evaluation](https://github.com/kwindla/aiewf-eval) ([blog post](https://www.daily.co/blog/benchmarking-llms-for-voice-agent-use-cases/)), which tested text and speech-to-speech models on tool use, instruction following, and knowledge base grounding in an AI Engineer World's Fair conference assistant scenario.
+Audio Arena started as an extension of [Kwindla Hultman Kramer](https://github.com/kwindla)'s [30-turn multi-turn evaluation](https://github.com/kwindla/aiewf-eval) ([blog post](https://www.daily.co/blog/benchmarking-llms-for-voice-agent-use-cases/)), which tested text and speech-to-speech models on tool use, instruction following, and knowledge base grounding in an AI Engineer World's Fair conference assistant scenario.
 
-The original 30 questions turned out to not be sufficiently challenging — most frontier models scored above 90% on nearly every category. We discarded the majority of the original turns and rebuilt the benchmark from scratch as a **75-turn static hard benchmark**. Only a small number of basic QA and tool-use turns from the original were retained, and even those were revised.
+The original 30 turns proved insufficiently challenging — most frontier models scored above 90% across nearly every category. We discarded the majority of them and rebuilt the benchmark from scratch as a **75-turn static hard benchmark**, retaining only a handful of basic QA and tool-use turns (revised for consistency).
 
-The new benchmark is 2.5x larger and substantially harder, with turns specifically designed to test adversarial traps, multi-step tool use, long-range memory, error recovery, cancellation flows, ambiguity handling, implicit correction, and distractor injection. See the [Methodology](#methodology) section below for the full details and scoring rubric.
+The result is 2.5x larger and substantially harder. Turns are designed to probe adversarial traps, multi-step tool use, long-range memory, error recovery, cancellation flows, ambiguity handling, implicit correction, and distractor injection. See [Methodology](#methodology) for the full scoring rubric.
 
-The benchmark uses a ~12K token knowledge base with 75 turns, 9 tools, and pre-recorded audio files.
+At a glance: **75 turns, 9 tools, ~12K-token knowledge base, and pre-recorded audio for every turn.**
 
 ## Quick Start
 
@@ -53,9 +53,6 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Model provider keys (set whichever you need)
 export OPENAI_API_KEY=sk-...          # OpenAI (text and realtime)
 export GOOGLE_API_KEY=...             # Google (Gemini text and Gemini Live)
-export OPENROUTER_API_KEY=...         # OpenRouter (access to multiple providers)
-export GROQ_API_KEY=...               # Groq
-export CEREBRAS_API_KEY=...           # Cerebras
 export ULTRAVOX_API_KEY=...           # Ultravox
 export XAI_API_KEY=...                # xAI (Grok Realtime)
 
@@ -171,11 +168,10 @@ For convenience, common service classes have short aliases:
 | `anthropic` | Anthropic (Claude models) |
 | `google` | Google (Gemini text models) |
 | `gemini-live` | Google Gemini Live (speech-to-speech) |
-| `openrouter` | OpenRouter (multi-provider, OpenAI-compatible) |
-| `groq` | Groq |
-| `cerebras` | Cerebras |
 | `bedrock` | AWS Bedrock (Nova text models) |
 | `ultravox-realtime` | Ultravox (speech-to-speech) |
+
+Additional providers (OpenRouter, Groq, Cerebras) are also supported — run `uv run audio-arena list-aliases` to see all options.
 
 You can also use fully-qualified class names:
 
@@ -320,29 +316,35 @@ uv run python scripts/analyze_turn_metrics.py runs/conference_assistant/<timesta
 
 ## Methodology
 
-The new and redesigned turns specifically test:
+Every turn is designed to stress-test a specific failure mode:
 
-- **Adversarial traps** — Authority appeals, plausible hallucinations, subtle prompt injection, near-miss entities, and false recall
-- **Multi-step tool use and long-range memory** — Conditional logic, parallel chains, implicit requirements, rollbacks, and correct use of information from many turns earlier
-- **Error recovery** — Cascading failures, partial success states, and ambiguous error messages
-- **Cancellation flow and state tracking** — User changes of mind and correct handling of cancelled actions across turns
-- **Ambiguity handling** — Ambiguous entities (e.g., two people with the same name), compound ambiguity, and dependent or contradictory constraints
-- **Implicit correction** — Nested misconceptions, partial truths, and false attributions that the model must correct without over-correcting
-- **Distractor injection** — Buried questions, emotional manipulation, and technical tangents that require focusing on the actual user intent
+| Category | What it tests |
+|----------|---------------|
+| **Adversarial traps** | Authority appeals, plausible hallucinations, prompt injection, near-miss entities, false recall |
+| **Multi-step tool use & long-range memory** | Conditional logic, parallel chains, implicit requirements, rollbacks, recall across many turns |
+| **Error recovery** | Cascading failures, partial success states, ambiguous error messages |
+| **Cancellation flow & state tracking** | Changes of mind, correct handling of cancelled actions across turns |
+| **Ambiguity handling** | Same-name entities, compound ambiguity, dependent or contradictory constraints |
+| **Implicit correction** | Nested misconceptions, partial truths, false attributions — correct without over-correcting |
+| **Distractor injection** | Buried questions, emotional manipulation, technical tangents requiring focus on actual intent |
 
 ### Scoring Rubric
 
-- **Category-aware dimensions** — Core dimensions (tool use, instruction following, KB grounding) are scored on every turn. The dimensions `state_tracking` and `ambiguity_handling` are scored only on turns tagged with the relevant categories (e.g., long-range memory, cancellation flow, implicit correction, ambiguous entity), so we do not penalize models on dimensions that are out of scope for a given turn.
-- **Two-phase evaluation** — An initial turn-by-turn pass is followed by a realignment pass that detects early or late function calls and cascading effects. If a required call was made a turn early, later turns that "expected" that call are not penalized for a "missing" call; if a call was made a turn late, the turn where it was actually made gets credit.
-- **Penalty absorption** — When a missed tool call has a more specific root cause, the penalty lands on that dimension instead of `tool_use_correct`. If a model over-clarified (asked for confirmation when it wasn't needed) and `ambiguity_handling` is in scope, the penalty goes to `ambiguity_handling`. If a model forgot earlier conversational state and `state_tracking` is in scope, the penalty goes to `state_tracking`. This avoids double-penalizing while ensuring every failure is counted exactly once.
-- **Strict separation of instruction_following and tool_use_correct** — Failing to call a tool when expected is scored only under `tool_use_correct` (or absorbed by a more specific dimension). `instruction_following` is failed only when the assistant's words and actions contradict each other in a non-tool sense.
-- **Turn-taking and leniency** — For speech-to-speech runs, a pre-computed `turn_taking` dimension reflects audio timing (overlaps, interruptions, missing response). When turn_taking fails, the judge is more lenient on instruction_following to account for possible transcription or audio issues.
+**Category-aware dimensions.** Core dimensions (tool use, instruction following, KB grounding) are scored on every turn. `state_tracking` and `ambiguity_handling` are scored only on turns tagged with the relevant categories, so models are never penalized on out-of-scope dimensions.
 
-The benchmark is **static**: the same 75 user inputs (and corresponding audio) are used for every run, with golden expectations and category tags defined in `benchmarks/conference_assistant/turns.py`, so results are comparable across models and runs.
+**Two-phase evaluation.** An initial turn-by-turn pass is followed by a realignment pass that detects early or late function calls and cascading effects. If a required call was made a turn early, later turns are not penalized for the "missing" call; if made late, the turn where it actually happened gets credit.
+
+**Penalty absorption.** When a missed tool call has a more specific root cause, the penalty lands on that dimension instead of `tool_use_correct` — e.g., unnecessary clarification penalizes `ambiguity_handling`, forgotten state penalizes `state_tracking`. This avoids double-penalizing while ensuring every failure is counted exactly once.
+
+**Strict dimension separation.** Failing to call a tool is scored only under `tool_use_correct` (or absorbed by a more specific dimension). `instruction_following` fails only when the assistant's words and actions contradict each other in a non-tool sense.
+
+**Turn-taking leniency.** For speech-to-speech runs, a `turn_taking` dimension captures audio timing issues (overlaps, interruptions, missing responses). When turn-taking fails, the judge is more lenient on `instruction_following` to account for transcription artifacts.
+
+The benchmark is **static** — the same 75 inputs and audio files are used for every run, with golden expectations defined in `benchmarks/conference_assistant/turns.py`, making results directly comparable across models.
 
 ## Acknowledgments
 
-Audio Arena is built on top of the [Pipecat](https://github.com/pipecat-ai/pipecat) open-source framework for voice and multimodal AI. The original 30-turn evaluation was created by [Kwindla Hultman Kramer](https://github.com/kwindla) at [Daily](https://www.daily.co/) — see the [original blog post](https://www.daily.co/blog/benchmarking-llms-for-voice-agent-use-cases/) and [original repo](https://github.com/kwindla/aiewf-eval).
+Audio Arena is built on [Pipecat](https://github.com/pipecat-ai/pipecat), the open-source framework for voice and multimodal AI. The original 30-turn evaluation was created by [Kwindla Hultman Kramer](https://github.com/kwindla) at [Daily](https://www.daily.co/) — see the [original blog post](https://www.daily.co/blog/benchmarking-llms-for-voice-agent-use-cases/) and [repo](https://github.com/kwindla/aiewf-eval).
 
 Judging is powered by [Claude](https://www.anthropic.com/) via the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk). Voice activity detection uses [Silero VAD](https://github.com/snakers4/silero-vad).
 
