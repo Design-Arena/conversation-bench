@@ -1,0 +1,37 @@
+[project]
+name = "audio-arena"
+version = "0.1.0"
+description = "Audio Arena: Multi-turn voice AI evaluation framework"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "click>=8.3",
+  "pipecat-ai[anthropic,aws,aws-nova-sonic,azure,cerebras,google,groq,openai,silero]==0.0.101",
+  "google-genai>=1.56.0",
+  "python-dotenv",
+  "loguru",
+  "sounddevice>=0.4.6",
+  "soundfile>=0.12.1",
+  "numpy>=1.26",
+  "claude-agent-sdk>=0.1.8",
+  "torch>=2.9.1",
+  "torchaudio>=2.9.1",
+]
+
+[project.scripts]
+# Main CLI entry point: uv run audio-arena <command>
+audio-arena = "audio_arena.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.20"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audio_arena", "benchmarks"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "benchmarks"]
+
+[tool.uv.sources]
+# Use github branch of pipecat instead of PyPI (commented out to use PyPI versions)
+# pipecat-ai = { git = "https://github.com/pipecat-ai/pipecat.git", rev = "main" }
