@@ -9,6 +9,13 @@ venv/
 # Output directories
 runs/
 
+# Benchmark audio files (downloaded from HF on first run)
+benchmarks/*/audio/
+
+# HF dataset staging folders
+benchmarks/*/hf_dataset/
+staging_*/
+
 # Python
 __pycache__/
 *.pyc

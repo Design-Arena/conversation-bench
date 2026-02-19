@@ -985,57 +985,48 @@ turns = [
 ]
 
 # ============================================================================
-# CATEGORY TO SCORING DIMENSIONS MAPPING
-# Defines which dimensions are ACTUALLY scored for each category
+# SCORING DIMENSIONS
+#   Core (every turn):  KB · Instr · Tool
+#   Conditional:        State · Ambiguity  (added per-category)
 # ============================================================================
 
+CORE_DIMENSIONS = ['kb_grounding', 'instruction_following', 'tool_use_correct']
+
 CATEGORY_DIMENSIONS = {
-    # Categories that score state_tracking
-    'long_range_memory': ['state_tracking'],
+    'long_range_memory':    ['state_tracking'],
     'cross_turn_reasoning': ['state_tracking'],
-    'cancellation_flow': ['state_tracking'],
-    'implicit_correction': ['state_tracking'],
-    
-    # Categories that score ambiguity_handling
-    'ambiguous_entity': ['ambiguity_handling'],
-    
-    # These only use core dimensions (tool_use, instruction_following, kb_grounding)
-    'basic_qa': [],
-    'tool_use': [],
-    'adversarial_trap': [],
-    'numerical_reasoning': [],
-    'negation_reasoning': [],
-    'multi_step_tool': [],
-    'error_recovery': [],
+    'cancellation_flow':    ['state_tracking'],
+    'implicit_correction':  ['state_tracking'],
+    'error_recovery':       ['state_tracking'],
+
+    'ambiguous_entity':     ['ambiguity_handling'],
+    'numerical_reasoning':  ['ambiguity_handling'],
+
+    'basic_qa':             [],
+    'tool_use':             [],
+    'adversarial_trap':     [],
+    'negation_reasoning':   [],
+    'multi_step_tool':      [],
     'distractor_injection': [],
 }
 
 
 def get_relevant_dimensions(turn: dict) -> list[str]:
-    """Get the list of dimensions that should be scored for this turn.
-    
-    Returns:
-        List of dimension names. Always includes core dimensions.
-        May include 'state_tracking' and/or 'ambiguity_handling' based on categories.
+    """Return scoring dimensions for a turn.
+
+    Always includes kb_grounding, instruction_following, tool_use_correct.
+    Adds state_tracking and/or ambiguity_handling based on the turn's categories.
     """
-    # Core dimensions are always scored
-    dims = ['tool_use_correct', 'instruction_following', 'kb_grounding']
-    
-    # Support both old 'category' (string) and new 'categories' (list) format
+    dims = list(CORE_DIMENSIONS)
+
     categories = turn.get('categories', [])
     if not categories:
-        # Fallback to old format
-        category = turn.get('category')
-        categories = [category] if category else []
-    
-    if not categories:
-        # Basic turns (0-28) only get core dimensions
-        return dims
-    
-    # Add category-specific dimensions (deduplicated)
-    extra_dims = set()
+        cat = turn.get('category')
+        categories = [cat] if cat else []
+
+    extra = set()
     for cat in categories:
-        extra_dims.update(CATEGORY_DIMENSIONS.get(cat, []))
-    dims.extend(extra_dims)
-    
+        extra.update(CATEGORY_DIMENSIONS.get(cat, []))
+    dims.extend(sorted(extra))
+
     return dims

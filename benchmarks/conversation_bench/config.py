@@ -9,21 +9,21 @@ from .system import system_instruction
 class BenchmarkConfig:
     """Configuration for the conversation bench benchmark."""
 
-    # Benchmark metadata
     name = "conversation_bench"
     description = "75-turn hard benchmark with ~12K token knowledge base and 9 tools"
+    hf_repo = "arcada-labs/conversation-bench"
 
-    # Benchmark data
     turns = turns
     tools_schema = ToolsSchemaForTest
-
-    # Audio directory path
-    audio_dir = Path(__file__).parent / "audio"
-
-    # System prompt
     system_instruction = system_instruction
+
+    _benchmark_dir = Path(__file__).parent
+    audio_dir = _benchmark_dir / "audio"
 
     @classmethod
     def get_audio_path(cls, turn_index: int) -> Path:
-        """Get the audio file path for a specific turn."""
+        """Get the audio file path for a specific turn, downloading from HF if needed."""
+        if not cls.audio_dir.exists() or not any(cls.audio_dir.glob("*.wav")):
+            from audio_arena.data import ensure_audio
+            cls.audio_dir = ensure_audio(cls._benchmark_dir, cls.hf_repo)
         return cls.audio_dir / f"turn_{turn_index:03d}.wav"
