@@ -4,9 +4,9 @@ ConversationBench is a benchmark for evaluating speech-to-speech voice AI models
 
 ConversationBench is part of [Audio Arena](https://audioarena.ai), built by [Arcada Labs](https://arcada.dev).
 
-- **Leaderboard & results**: [audioarena.ai](https://audioarena.ai)
-- **Dataset on Hugging Face**: [arcada-labs/audio-arena](https://huggingface.co/datasets/arcada-labs/audio-arena)
-- **Source code**: [github.com/Design-Arena/audio-arena](https://github.com/Design-Arena/audio-arena)
+- **Leaderboard & results**: [audioarena.ai/leaderboard](https://audioarena.ai/leaderboard)
+- **Dataset on Hugging Face**: [arcada-labs/conversation-bench](https://huggingface.co/datasets/arcada-labs/conversation-bench)
+- **Source code**: [github.com/Design-Arena/conversation-bench](https://github.com/Design-Arena/conversation-bench)
 
 ## What makes this different from text benchmarks
 
@@ -30,7 +30,7 @@ uv sync
 # List available benchmarks
 uv run audio-arena list-benchmarks
 
-# Run a benchmark. Results will be saved to runs/conversation_bench/<timestamp>_<model_name>
+# Run a benchmark (audio files download automatically from HF on first run)
 uv run audio-arena run conversation_bench --model claude-sonnet-4-5 --service anthropic
 
 # Judge the results
@@ -42,9 +42,19 @@ uv run audio-arena judge runs/conversation_bench/<timestamp>_claude-sonnet-4-5
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/Design-Arena/audio-arena.git
-cd audio-arena
+git clone https://github.com/Design-Arena/conversation-bench.git
+cd conversation-bench
 uv sync
+```
+
+Audio files are hosted on Hugging Face and downloaded automatically when you first run a benchmark. To pre-download:
+
+```bash
+# Download audio for a specific benchmark
+uv run audio-arena download conversation_bench
+
+# Or download manually with huggingface-cli
+huggingface-cli download arcada-labs/conversation-bench --local-dir benchmarks/conversation_bench --include "audio/*.wav"
 ```
 
 ## Environment Variables
@@ -149,6 +159,21 @@ Judge outputs (saved to the run directory):
 
 See the [Methodology](#methodology) section for details on two-phase evaluation, penalty absorption, and category-aware scoring.
 
+### Downloading Audio
+
+Audio files are hosted on Hugging Face and downloaded automatically the first time you run a benchmark. You can also pre-download explicitly:
+
+```bash
+# Pre-download audio for a benchmark
+uv run audio-arena download conversation_bench
+```
+
+Or download manually with the HF CLI:
+
+```bash
+huggingface-cli download arcada-labs/conversation-bench --local-dir benchmarks/conversation_bench --include "audio/*.wav"
+```
+
 ### Listing Options
 
 ```bash
@@ -189,18 +214,18 @@ uv run audio-arena run conversation_bench \
 ## Benchmarks
 
 Benchmarks are located in `benchmarks/`. Each benchmark is a self-contained Python package with:
-- `config.py` - Benchmark configuration (turns, tools, system instruction)
+- `config.py` - Benchmark configuration (turns, tools, system instruction, HF repo)
 - `turns.py` - Turn definitions with golden answers
 - `tools.py` - Tool/function schema definitions
 - `system.py` - System prompt with knowledge base
 - `data/knowledge_base.txt` - Knowledge base content
-- `audio/` - Pre-recorded audio files for each turn
+- `audio/` - Downloaded automatically from Hugging Face on first run
 
 ### Available Benchmarks
 
-| Benchmark | Description | Knowledge Base |
-|-----------|-------------|----------------|
-| `conversation_bench` | 75-turn hard benchmark | ~12K tokens |
+| Benchmark | Turns | HF Dataset | Description |
+|-----------|-------|------------|-------------|
+| `conversation_bench` | 75 | [arcada-labs/conversation-bench](https://huggingface.co/datasets/arcada-labs/conversation-bench) | Conference assistant with ~12K token KB and 9 tools |
 
 ## Pipelines
 
@@ -233,6 +258,7 @@ runs/
 audio-arena/
 ├── src/audio_arena/               # Main package
 │   ├── cli.py                     # CLI entry point
+│   ├── data.py                    # HF dataset download utility
 │   ├── pipelines/                 # Pipeline implementations
 │   │   ├── base.py                # Abstract base pipeline
 │   │   ├── text.py                # Text pipeline
@@ -241,26 +267,16 @@ audio-arena/
 │   │   ├── grok_realtime.py       # Grok Realtime pipeline
 │   │   └── nova_sonic.py          # Nova Sonic pipeline
 │   ├── processors/                # Frame processors
-│   │   ├── tool_call_recorder.py  # Records tool calls
-│   │   ├── tts_transcript.py      # TTS transcript handling
-│   │   └── audio_buffer.py        # Audio buffer processing
 │   ├── transports/                # Input/output transports
-│   │   ├── paced_input.py         # Paced audio input
-│   │   └── null_audio_output.py   # Null audio sink
 │   ├── recording/                 # Transcript recording
-│   │   └── transcript_recorder.py # Records transcripts
 │   └── judging/                   # Judge implementations
-│       ├── claude_judge.py        # Claude-based judging
-│       └── turn_taking.py         # Turn-taking analysis
 │
 ├── benchmarks/
-│   └── conversation_bench/      # 75-turn hard benchmark
-│       ├── config.py
-│       ├── turns.py
-│       ├── tools.py
-│       ├── system.py
-│       ├── audio/
-│       └── data/
+│   └── conversation_bench/        # 75-turn conference assistant
+│       ├── config.py              # HF repo: arcada-labs/conversation-bench
+│       ├── turns.py, tools.py, system.py
+│       ├── data/knowledge_base.txt
+│       └── audio/                 # Downloaded from HF (gitignored)
 │
 ├── scripts/
 │   └── analyze_turn_metrics.py    # Per-turn timing analysis
@@ -268,6 +284,8 @@ audio-arena/
 ├── LICENSE
 └── pyproject.toml
 ```
+
+Audio files (~80MB per benchmark) are stored on Hugging Face, not in this repo. The code auto-downloads them on first run.
 
 ## Comprehensive Turn Metrics Analysis
 
@@ -375,7 +393,7 @@ If you use this benchmark, please cite:
   title={AudioArena: A Multi-Turn Speech-to-Speech Evaluation Benchmark},
   author={Arcada Labs},
   year={2026},
-  url={https://huggingface.co/datasets/arcada-labs/audio-arena}
+  url={https://huggingface.co/datasets/arcada-labs/conversation-bench}
 }
 ```
 

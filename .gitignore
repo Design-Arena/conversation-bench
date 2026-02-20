@@ -9,12 +9,32 @@ venv/
 # Output directories
 runs/
 
+# Supabase schema (local reference only, not for public repo)
+src/audio_arena/supabase/
+
 # Benchmark audio files (downloaded from HF on first run)
 benchmarks/*/audio/
 
 # HF dataset staging folders
 benchmarks/*/hf_dataset/
 staging_*/
+
+# Internal scripts (not for public repo)
+scripts/publish_to_hf.py
+scripts/upload_to_supabase.py
+scripts/generate_audio.py
+scripts/generate_appointment_audio.py
+
+# Unpublished benchmarks
+benchmarks/assistant_bench/
+benchmarks/product_bench/
+benchmarks/restaurant_bench/
+benchmarks/setup_bench/
+benchmarks/travel_bench/
+benchmarks/wifi_bench/
+
+# Claude config
+.claude-home/
 
 # Python
 __pycache__/
