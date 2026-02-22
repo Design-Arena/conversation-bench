@@ -58,6 +58,7 @@ Why the constructor takes get_last_tool_result (constructor diff vs base):
      after the response is complete and there is no active response
 """
 
+import asyncio
 import json
 from typing import Callable, Optional
 
@@ -68,12 +69,101 @@ from pipecat.services.openai.realtime import events as rt_events
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
 
-class OpenAIRealtimeLLMServiceExplicitToolResult(OpenAIRealtimeLLMService):
+class ReconnectOnDisconnectMixin:
+    """Mixin for OpenAI-protocol LLM services that auto-reconnect on unexpected WS close.
+
+    Provides:
+    - ``_init_reconnection_callbacks(on_reconnecting, on_reconnected)`` — call from ``__init__``
+    - ``_reconnect_on_disconnect()`` — reopen the WebSocket and fire callbacks
+    - ``_handle_ws_close()`` — post-loop check; call at the end of ``_receive_task_handler``
+
+    Used by both ``OpenAIRealtimeLLMServiceExplicitToolResult`` and ``XAIRealtimeLLMService``.
+    """
+
+    _on_reconnecting: Optional[Callable[[], None]]
+    _on_reconnected: Optional[Callable[[], None]]
+
+    def _init_reconnection_callbacks(
+        self,
+        on_reconnecting: Optional[Callable[[], None]] = None,
+        on_reconnected: Optional[Callable[[], None]] = None,
+    ):
+        self._on_reconnecting = on_reconnecting
+        self._on_reconnected = on_reconnected
+
+    async def _reconnect_on_disconnect(self):
+        """Reconnect after an unexpected WebSocket disconnection.
+
+        Opens a new WebSocket session and signals the pipeline to retry
+        the current turn. Conversation history is enriched into the system
+        instructions by the on_reconnecting callback before the new session
+        starts.
+        """
+        if self._on_reconnecting:
+            try:
+                self._on_reconnecting()
+            except Exception as e:
+                logger.warning(f"Error in on_reconnecting callback: {e}")
+
+        self._api_session_ready = False
+        old_ws = self._websocket
+        self._websocket = None
+
+        try:
+            if old_ws:
+                await old_ws.close()
+        except Exception:
+            pass
+
+        logger.info("Establishing new WebSocket connection...")
+        await self._connect()
+
+        for _ in range(100):
+            if self._api_session_ready:
+                break
+            await asyncio.sleep(0.1)
+
+        if self._api_session_ready:
+            logger.info("Reconnection successful, session ready")
+            if self._on_reconnected:
+                try:
+                    self._on_reconnected()
+                except Exception as e:
+                    logger.warning(f"Error in on_reconnected callback: {e}")
+        else:
+            logger.error("Reconnection failed — session not ready after 10s timeout")
+
+    async def _handle_ws_close(self):
+        """Check WebSocket close code after the receive loop exits.
+
+        Call this at the end of ``_receive_task_handler()`` to detect
+        unexpected disconnections and trigger automatic reconnection.
+        """
+        if getattr(self, '_disconnecting', False):
+            return
+
+        close_code = getattr(self._websocket, 'close_code', None) if self._websocket else None
+        close_reason = getattr(self._websocket, 'close_reason', '') if self._websocket else ''
+
+        if close_code is not None and close_code != 1000:
+            logger.warning(
+                f"WebSocket closed unexpectedly "
+                f"(code={close_code}, reason={close_reason}), reconnecting..."
+            )
+            await self._reconnect_on_disconnect()
+        elif close_code is not None:
+            logger.info(f"WebSocket closed normally (code={close_code})")
+
+
+class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, OpenAIRealtimeLLMService):
     """OpenAI Realtime service that explicitly sends tool results to the API.
 
     Completely takes over function call handling to avoid the
     "conversation_already_has_active_response" error that occurs when
     response.create is sent during an active response.
+
+    Also detects unexpected WebSocket disconnections and reconnects
+    automatically via ``ReconnectOnDisconnectMixin``.
 
     Flow:
     1. response.function_call_arguments.done fires (during active response)
@@ -84,12 +174,16 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(OpenAIRealtimeLLMService):
     6. We send response.create to trigger the model to continue
     """
 
-    def __init__(self, get_last_tool_result: Optional[Callable[[], dict]] = None, **kwargs):
-        """See module docstring 'Why the constructor takes get_last_tool_result'.
-        When provided, we call it when sending function_call_output; else we send {"status": "success"}.
-        """
+    def __init__(
+        self,
+        get_last_tool_result: Optional[Callable[[], dict]] = None,
+        on_reconnecting: Optional[Callable[[], None]] = None,
+        on_reconnected: Optional[Callable[[], None]] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._get_last_tool_result = get_last_tool_result
+        self._init_reconnection_callbacks(on_reconnecting, on_reconnected)
         # Flag: when True, _handle_evt_response_done will send response.create
         self._pending_response_create = False
 
@@ -166,3 +260,8 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(OpenAIRealtimeLLMService):
             self._pending_response_create = False
             await self.send_client_event(rt_events.ResponseCreateEvent())
             logger.info("[OpenAI Realtime] Sent deferred response.create after response.done")
+
+    async def _receive_task_handler(self):
+        """Override to detect unexpected disconnections and reconnect."""
+        await super()._receive_task_handler()
+        await self._handle_ws_close()

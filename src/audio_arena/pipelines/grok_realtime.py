@@ -25,10 +25,11 @@ from pipecat.services.llm_service import FunctionCallFromLLM
 from pipecat.services.openai.realtime import events as rt_events
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
+from audio_arena.pipelines.openai_realtime import ReconnectOnDisconnectMixin
 from audio_arena.pipelines.realtime import RealtimePipeline
 
 
-class XAIRealtimeLLMService(OpenAIRealtimeLLMService):
+class XAIRealtimeLLMService(ReconnectOnDisconnectMixin, OpenAIRealtimeLLMService):
     """xAI Grok Voice Agent API service.
 
     Extends OpenAI Realtime service to handle xAI-specific protocol differences:
@@ -37,11 +38,20 @@ class XAIRealtimeLLMService(OpenAIRealtimeLLMService):
     - Tool format conversion (flat to nested "function" key)
     - Function calls in response.done output array
     - Validation workarounds for non-standard field values
+
+    Auto-reconnects on unexpected WS close via ``ReconnectOnDisconnectMixin``.
     """
 
-    def __init__(self, get_last_tool_result: Optional[Callable[[], dict]] = None, **kwargs):
+    def __init__(
+        self,
+        get_last_tool_result: Optional[Callable[[], dict]] = None,
+        on_reconnecting: Optional[Callable[[], None]] = None,
+        on_reconnected: Optional[Callable[[], None]] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._get_last_tool_result = get_last_tool_result
+        self._init_reconnection_callbacks(on_reconnecting, on_reconnected)
         # Track if we're using manual turn handling (VAD disabled)
         session_props = kwargs.get("session_properties")
         self._manual_turn_handling = (
@@ -289,6 +299,9 @@ class XAIRealtimeLLMService(OpenAIRealtimeLLMService):
             except Exception as e:
                 logger.warning(f"Error processing xAI event: {e}")
 
+        # WebSocket loop ended — check if we should reconnect
+        await self._handle_ws_close()
+
 
 class GrokRealtimePipeline(RealtimePipeline):
     """Pipeline for xAI Grok Voice Agent API.
@@ -298,6 +311,7 @@ class GrokRealtimePipeline(RealtimePipeline):
     - wss://api.x.ai/v1/realtime endpoint
     - XAIRealtimeLLMService for protocol handling
     - xAI-specific VAD settings
+    - Automatic reconnection with conversation history replay on disconnect
     """
 
     requires_service = False  # This pipeline creates its own XAIRealtimeLLMService
@@ -352,4 +366,6 @@ class GrokRealtimePipeline(RealtimePipeline):
             get_last_tool_result=lambda: getattr(
                 self, "_last_tool_result", {"status": "success"}
             ),
+            on_reconnecting=self._on_ws_reconnecting,
+            on_reconnected=self._on_ws_reconnected,
         )

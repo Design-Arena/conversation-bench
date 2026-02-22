@@ -5,6 +5,7 @@ from loguru import logger
 
 from pipecat.frames.frames import (
     Frame,
+    InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMTextFrame,
     TranscriptionMessage,
@@ -124,6 +125,22 @@ class TTSStoppedAssistantTranscriptProcessor(AssistantTranscriptProcessor):
             else:
                 logger.info("[TRANSCRIPT] No text to flush (already flushed)")
 
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, InterruptionFrame):
+            # Defensive safeguard: the benchmark pipeline sets
+            # allow_interruptions=False so InterruptionFrame should never
+            # arrive. If it does (Pipecat internal edge case), discard any
+            # partial text so the stale fragment doesn't bleed into the next
+            # response's transcript.
+            if self._current_text_parts:
+                discarded = "".join(p.text for p in self._current_text_parts)
+                logger.warning(
+                    f"[TRANSCRIPT] InterruptionFrame (unexpected — interruptions disabled) — "
+                    f"discarding {len(self._current_text_parts)} partial text parts "
+                    f"({len(discarded)} chars): {discarded[:80]}..."
+                )
+                self._current_text_parts = []
+                self._aggregation_start_time = None
             await self.push_frame(frame, direction)
         else:
             # Forward everything else without flushing

@@ -26,6 +26,7 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
+    InterruptionFrame,
     LLMContextFrame,
     LLMMessagesAppendFrame,
     LLMRunFrame,
@@ -34,6 +35,7 @@ from pipecat.frames.frames import (
     TranscriptionMessage,
     TTSStartedFrame,
     TTSStoppedFrame,
+    UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -139,6 +141,7 @@ class TurnGate(FrameProcessor):
         self._audio_drain_delay = audio_drain_delay
         self._no_response_timeout = no_response_timeout
         self._pending_transcript: Optional[str] = None
+        self._turn_transcript_parts: list[str] = []
         self._bot_speaking = False
         self._turn_end_task: Optional[asyncio.Task] = None
 
@@ -174,13 +177,24 @@ class TurnGate(FrameProcessor):
 
         Called by the transcript handler when assistant response is complete.
         The turn won't advance until BotStoppedSpeakingFrame is received.
+
+        All segments within a single turn are accumulated in
+        ``_turn_transcript_parts`` so that multi-segment responses
+        (e.g. pre-tool preamble + post-tool answer) are fully preserved.
         """
-        logger.info(f"[TurnGate] Storing pending transcript ({len(text)} chars)")
+        self._turn_transcript_parts.append(text)
+        logger.info(
+            f"[TurnGate] Storing pending transcript ({len(text)} chars, "
+            f"parts={len(self._turn_transcript_parts)}): "
+            f"{text[:80]}{'...' if len(text) > 80 else ''} | "
+            f"bot_speaking={self._bot_speaking}"
+        )
         self._pending_transcript = text
 
     def clear_pending(self):
         """Clear any pending transcript and TTS state (e.g., on reconnection or empty response)."""
         self._pending_transcript = None
+        self._turn_transcript_parts = []
         self._tts_started = False
         self._bot_speaking = False
         if self._turn_end_task and not self._turn_end_task.done():
@@ -197,12 +211,27 @@ class TurnGate(FrameProcessor):
         return len(stripped.strip()) == 0
 
     async def _delayed_turn_end(self, text: str):
-        """Wait for audio to drain, then trigger turn end."""
+        """Wait for audio to drain, then trigger turn end.
+
+        Uses the accumulated ``_turn_transcript_parts`` (joined with newline)
+        so that multi-segment responses (pre-tool preamble + post-tool answer)
+        are fully captured. Falls back to *text* if no parts were collected.
+        """
         try:
             logger.info(f"[TurnGate] Waiting {self._audio_drain_delay}s for audio to drain...")
             await asyncio.sleep(self._audio_drain_delay)
-            logger.info(f"[TurnGate] Triggering turn end with transcript ({len(text)} chars)")
-            await self._on_turn_ready(text)
+            if self._turn_transcript_parts:
+                final = "\n".join(self._turn_transcript_parts)
+                if len(self._turn_transcript_parts) > 1:
+                    logger.info(
+                        f"[TurnGate] Joined {len(self._turn_transcript_parts)} transcript parts "
+                        f"({len(final)} chars total)"
+                    )
+            else:
+                final = text
+            self._turn_transcript_parts = []
+            logger.info(f"[TurnGate] Triggering turn end with transcript ({len(final)} chars)")
+            await self._on_turn_ready(final)
         except asyncio.CancelledError:
             logger.info("[TurnGate] Turn end cancelled (likely bot started speaking again)")
 
@@ -224,8 +253,22 @@ class TurnGate(FrameProcessor):
         """Watch for TTS and Bot speaking frames to manage turn advancement."""
         await super().process_frame(frame, direction)
 
-        # Start no-response timeout when user stops speaking
-        if isinstance(frame, VADUserStoppedSpeakingFrame):
+        # allow_interruptions=False should prevent this, but log if it still
+        # arrives via a Pipecat internal edge case.
+        if isinstance(frame, InterruptionFrame):
+            pending_len = len(self._pending_transcript) if self._pending_transcript else 0
+            logger.warning(
+                f"[TurnGate] InterruptionFrame (unexpected — interruptions disabled) | "
+                f"bot_speaking={self._bot_speaking} tts_started={self._tts_started} "
+                f"pending_transcript={pending_len} chars "
+                f"has_turn_end_task={self._turn_end_task is not None and not self._turn_end_task.done()}"
+            )
+
+        # Start no-response timeout when user stops speaking.
+        # Check both VADUserStoppedSpeakingFrame (client-side VAD) and
+        # UserStoppedSpeakingFrame (server-side VAD, e.g. xAI/OpenAI Realtime)
+        # so the timeout fires regardless of which VAD detected speech end.
+        if isinstance(frame, (VADUserStoppedSpeakingFrame, UserStoppedSpeakingFrame)):
             # Cancel any existing no-response check and start a new one
             if self._no_response_check_task and not self._no_response_check_task.done():
                 self._no_response_check_task.cancel()
@@ -252,6 +295,7 @@ class TurnGate(FrameProcessor):
                     if self._on_empty_response:
                         self._on_empty_response("empty_response")
                     self._pending_transcript = None
+                    self._turn_transcript_parts = []
 
         # If bot starts speaking, cancel pending checks and turn end
         if isinstance(frame, BotStartedSpeakingFrame):
@@ -457,6 +501,12 @@ class RealtimePipeline(BasePipeline):
         # Track when current user audio will finish playing (monotonic time)
         # This prevents queuing the next turn before current audio finishes
         self._current_audio_end_time: float = 0
+        # Watchdog timer: fires _on_empty_response if the turn doesn't advance
+        # within audio_duration + buffer. Catches cases where VAD fails to
+        # detect very short audio (e.g. "Yep."), so no VADUserStoppedSpeakingFrame
+        # is emitted and the TurnGate's no-response timer never starts.
+        self._turn_watchdog_task: Optional[asyncio.Task] = None
+        self._turn_watchdog_timeout: float = 30.0  # seconds after audio ends
         # Event to signal when pipeline is ready (StartFrame has reached end)
         self._pipeline_ready_event: asyncio.Event = asyncio.Event()
         # Event to signal when initial greeting starts (first BotStartedSpeakingFrame)
@@ -468,6 +518,13 @@ class RealtimePipeline(BasePipeline):
         self._max_turn_retries: int = 3
         # Track first user end time per turn (monotonic time) for accurate V2V metrics
         self._first_user_end_time: Optional[float] = None
+        # Conversation history for context preservation across reconnections.
+        # Captured for all models so that any pipeline with system-prompt-based
+        # reconnection (OpenAI Realtime, Grok) has consistent context.
+        # Gemini uses session resumption handles instead, but we still record
+        # history as a fallback.
+        self._conversation_history: list[dict] = []
+        self.MAX_CONTEXT_TURNS = 20
 
     def _is_gemini_live(self) -> bool:
         """Check if current model is Gemini Live."""
@@ -576,6 +633,9 @@ class RealtimePipeline(BasePipeline):
                 kwargs["get_last_tool_result"] = lambda: getattr(
                     self, "_last_tool_result", {"status": "success"}
                 )
+            if "ExplicitToolResult" in class_name:
+                kwargs["on_reconnecting"] = self._on_ws_reconnecting
+                kwargs["on_reconnected"] = self._on_ws_reconnected
             return service_class(**kwargs)
         elif "UltravoxRealtime" in class_name:
             # Ultravox Realtime: Use OneShotInputParams
@@ -621,9 +681,22 @@ class RealtimePipeline(BasePipeline):
 
         For OpenAI Realtime and Grok Realtime, we also add an initial user
         message to trigger the greeting when LLMRunFrame is queued.
+
+        In rehydration mode, golden conversation history is appended to the
+        system instruction so the model has perfect prior context.
         """
         system_instruction = getattr(self.benchmark, "system_instruction", "")
         tools = getattr(self.benchmark, "tools_schema", None)
+
+        # In rehydration mode, enrich the system instruction with golden history
+        # (same strategy as reconnection-based context preservation).
+        if self._rehydration_turns:
+            _, instruction_suffix = self.build_rehydration_history(self._rehydration_turns)
+            system_instruction = system_instruction + instruction_suffix
+            logger.info(
+                f"[Rehydration] Enriched system instruction with {len(self._rehydration_turns)} "
+                f"golden turns ({len(system_instruction)} chars total)"
+            )
 
         # Both OpenAI Realtime and Gemini Live read the system instruction from
         # an LLMContextFrame. The pipecat service extracts the system message
@@ -673,6 +746,71 @@ class RealtimePipeline(BasePipeline):
         self.paced_input.signal_ready()
         # Schedule a task to re-queue the current turn's audio after a short delay
         asyncio.create_task(self._retry_current_turn_after_reconnection())
+
+    # --- Shared WebSocket reconnection callbacks (OpenAI Realtime + Grok) ---
+
+    def _on_ws_reconnecting(self):
+        """Called when OpenAI/Grok closes the WebSocket unexpectedly, before reconnecting.
+
+        Pauses audio, clears partial state, enriches system instructions with
+        conversation history so the model retains context across the session boundary.
+        """
+        logger.info(f"Reconnecting: pausing audio, turn {self.turn_idx} will be retried")
+        self.needs_turn_retry = True
+        self.paced_input.pause()
+        self.assistant_shim.clear_buffer()
+        if self.turn_gate:
+            self.turn_gate.clear_pending()
+        self.reconnection_grace_until = time.monotonic() + 10.0
+
+        self._update_instructions_with_history()
+
+    def _on_ws_reconnected(self):
+        """Called after a successful OpenAI/Grok WebSocket reconnection."""
+        logger.info(f"Reconnected: scheduling turn {self.turn_idx} retry")
+        self.paced_input.signal_ready()
+        asyncio.create_task(self._retry_current_turn_after_reconnection())
+
+    def _update_instructions_with_history(self):
+        """Append recent conversation history to the session instructions.
+
+        Modifies self.llm._session_properties.instructions so that when the
+        new session calls _update_settings(), the enriched prompt is sent
+        via session.update. The model sees prior turns as part of its
+        instructions, preserving context without affecting audio behavior.
+
+        Used by both OpenAI Realtime (GPT) and Grok Realtime pipelines.
+        """
+        if not self._conversation_history:
+            return
+
+        history = self._conversation_history[-self.MAX_CONTEXT_TURNS:]
+        original = getattr(self.benchmark, "system_instruction", "")
+
+        lines = [
+            "\n\n--- CONVERSATION HISTORY ---",
+            "The following is the conversation so far. The user's name, "
+            "preferences, and any actions you have taken (tool calls, "
+            "registrations, schedule changes, etc.) are still in effect. "
+            "Continue naturally.",
+            "",
+        ]
+        for turn in history:
+            lines.append(f"User: {turn['user']}")
+            if turn.get("tool_calls"):
+                for tc in turn["tool_calls"]:
+                    lines.append(f"  [Tool call: {tc['name']}({tc['args']})]")
+            lines.append(f"Assistant: {turn['assistant']}")
+            lines.append("")
+
+        enriched = original + "\n".join(lines)
+
+        self.llm._session_properties.instructions = enriched
+        logger.info(
+            f"[Reconnection] Enriched system instructions with {len(history)} of "
+            f"{len(self._conversation_history)} conversation turns "
+            f"({len(enriched)} chars total)"
+        )
 
     async def _retry_current_turn_after_reconnection(self):
         """Re-queue the current turn's audio after reconnection.
@@ -740,6 +878,8 @@ class RealtimePipeline(BasePipeline):
             try:
                 self.paced_input.enqueue_wav_file(audio_path)
                 self.needs_turn_retry = False
+                audio_duration = self._get_audio_duration(audio_path)
+                self._start_turn_watchdog(audio_duration)
                 logger.info(f"Successfully re-queued audio for turn {self.turn_idx}")
             except Exception as e:
                 logger.exception(f"Failed to re-queue audio for turn {self.turn_idx}: {e}")
@@ -751,6 +891,38 @@ class RealtimePipeline(BasePipeline):
         """Force turn advancement after max retries exceeded."""
         logger.warning(f"[EMPTY_RESPONSE] Force advancing past turn {self.turn_idx}")
         await self._on_turn_end("[EMPTY_RESPONSE: No valid response after max retries]")
+
+    def _start_turn_watchdog(self, audio_duration: float):
+        """Start a watchdog timer for the current turn.
+
+        If the turn doesn't advance within audio_duration + _turn_watchdog_timeout,
+        trigger _on_empty_response. This catches VAD failures where SileroVAD
+        doesn't detect very short audio, so no VADUserStoppedSpeakingFrame fires.
+        """
+        self._cancel_turn_watchdog()
+        timeout = audio_duration + self._turn_watchdog_timeout
+        self._turn_watchdog_task = asyncio.create_task(
+            self._turn_watchdog(timeout, self.turn_idx)
+        )
+
+    def _cancel_turn_watchdog(self):
+        """Cancel any running watchdog timer."""
+        if self._turn_watchdog_task and not self._turn_watchdog_task.done():
+            self._turn_watchdog_task.cancel()
+            self._turn_watchdog_task = None
+
+    async def _turn_watchdog(self, timeout: float, expected_turn: int):
+        """Watchdog: if turn hasn't advanced after timeout, trigger empty response."""
+        try:
+            await asyncio.sleep(timeout)
+            if self.turn_idx == expected_turn and not self.done:
+                logger.warning(
+                    f"[TURN_WATCHDOG] Turn {expected_turn} did not advance within "
+                    f"{timeout:.1f}s — triggering empty response"
+                )
+                self._on_empty_response("no_response")
+        except asyncio.CancelledError:
+            pass
 
     def _build_task(self) -> None:
         """Build the pipeline with paced input and transcript processors."""
@@ -901,9 +1073,9 @@ class RealtimePipeline(BasePipeline):
             on_greeting_done=lambda: self._greeting_done.set(),
         )
         self.turn_gate.set_greeting_started_callback(lambda: self._greeting_started.set())
-        # Set up empty response callback for Gemini Live models
-        if self._is_gemini_live():
-            self.turn_gate.set_empty_response_callback(self._on_empty_response)
+        # Set up empty response callback for all models so the pipeline
+        # can retry or force-advance when the model fails to respond
+        self.turn_gate.set_empty_response_callback(self._on_empty_response)
 
         # Create null output transport to generate BotStoppedSpeakingFrame
         # This tracks when the bot finishes "speaking" (outputting audio)
@@ -943,6 +1115,7 @@ class RealtimePipeline(BasePipeline):
             idle_timeout_secs=45,
             idle_timeout_frames=(InputAudioRawFrame, OutputAudioRawFrame, MetricsFrame),
             params=PipelineParams(
+                allow_interruptions=False,
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
@@ -1084,6 +1257,7 @@ class RealtimePipeline(BasePipeline):
                     f"(duration: {audio_duration:.1f}s)"
                 )
                 self.paced_input.enqueue_wav_file(audio_path)
+                self._start_turn_watchdog(audio_duration)
             except Exception as e:
                 logger.exception(f"Failed to queue audio from {audio_path}: {e}")
                 self.current_turn_audio_path = None
@@ -1136,6 +1310,7 @@ class RealtimePipeline(BasePipeline):
                     f"(duration: {audio_duration:.1f}s)"
                 )
                 self.paced_input.enqueue_wav_file(audio_path)
+                self._start_turn_watchdog(audio_duration)
             except Exception as e:
                 logger.exception(f"Failed to queue audio for turn {self.turn_idx}: {e}")
                 audio_path = None
@@ -1173,6 +1348,16 @@ class RealtimePipeline(BasePipeline):
         if self.done:
             return
 
+        self._cancel_turn_watchdog()
+
+        truncated = len(assistant_text) < 20
+        if truncated:
+            logger.warning(
+                f"[TRUNCATED_RESPONSE] turn={self.turn_idx} "
+                f"text='{assistant_text}' ({len(assistant_text)} chars) — "
+                f"response appears truncated"
+            )
+
         # Wait for current user audio to finish playing before advancing
         # This ensures clean separation between turns in the recording
         if self._current_audio_end_time > 0:
@@ -1189,6 +1374,18 @@ class RealtimePipeline(BasePipeline):
         # Reset retry tracking for next turn
         self._turn_retry_count = 0
         self._first_user_end_time = None
+
+        # Capture conversation history for context preservation across reconnections.
+        # Recorded for all models so any pipeline can use it on disconnect.
+        if self.turn_idx < len(self.effective_turns):
+            user_text = self.effective_turns[self.turn_idx].get("input", "")
+            tool_calls = list(self._seen_tool_calls) if self._seen_tool_calls else []
+            entry: dict = {"user": user_text, "assistant": assistant_text}
+            if tool_calls:
+                entry["tool_calls"] = [
+                    {"name": name, "args": args} for name, args in tool_calls
+                ]
+            self._conversation_history.append(entry)
 
         # Call base class implementation for common turn handling
         await super()._on_turn_end(assistant_text)

@@ -1223,6 +1223,12 @@ class NovaSonicPipeline:
         self.output_transport = None  # NullAudioOutputTransport for pacing
         self.audio_buffer = None  # AudioBufferProcessor for recording
 
+        # Watchdog timer: fires force-advance if the turn doesn't advance
+        # within audio_duration + buffer. Survives session rotations (unlike
+        # the NovaSonicTurnGate response timeout which gets cancelled on reconnect).
+        self._turn_watchdog_task: Optional[asyncio.Task] = None
+        self._turn_watchdog_timeout: float = 30.0  # seconds after audio ends
+
         # Session transition audio buffer (rolling 3s window of user audio)
         self._transition_audio_buffer = AudioBuffer(
             max_duration_seconds=3.0,  # audio_buffer_duration_seconds
@@ -1450,6 +1456,8 @@ class NovaSonicPipeline:
             if self.done:
                 logger.info("end_of_turn called but already done")
                 return
+
+            self._cancel_turn_watchdog()
 
             # Record this turn
             self.recorder.write_turn(
@@ -1823,6 +1831,7 @@ class NovaSonicPipeline:
             idle_timeout_secs=300,  # 5 min: generous for reconnection + slow responses
             idle_timeout_frames=(TTSAudioRawFrame, TTSTextFrame, InputAudioRawFrame, MetricsFrame),
             params=PipelineParams(
+                allow_interruptions=False,
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
@@ -1941,9 +1950,46 @@ class NovaSonicPipeline:
                 logger.info("Using LLMRunFrame for Nova 2 Sonic")
                 await self.task.queue_frames([LLMRunFrame()])
             logger.info("Triggered assistant response")
+            self._start_turn_watchdog(audio_duration_sec)
         else:
             logger.error("No audio file for first turn - Nova Sonic requires audio input!")
             await self.task.cancel()
+
+    def _start_turn_watchdog(self, audio_duration: float):
+        """Start a watchdog timer for the current turn.
+
+        If the turn doesn't advance within audio_duration + _turn_watchdog_timeout,
+        force-advance. This survives session rotations (unlike the NovaSonicTurnGate
+        response timeout which gets cancelled on reconnect).
+        """
+        self._cancel_turn_watchdog()
+        timeout = audio_duration + self._turn_watchdog_timeout
+        self._turn_watchdog_task = asyncio.create_task(
+            self._turn_watchdog(timeout, self.turn_idx)
+        )
+
+    def _cancel_turn_watchdog(self):
+        """Cancel any running watchdog timer."""
+        if self._turn_watchdog_task and not self._turn_watchdog_task.done():
+            self._turn_watchdog_task.cancel()
+            self._turn_watchdog_task = None
+
+    async def _turn_watchdog(self, timeout: float, expected_turn: int):
+        """Watchdog: if turn hasn't advanced after timeout, force-advance."""
+        try:
+            await asyncio.sleep(timeout)
+            if self.turn_idx == expected_turn and not self.done:
+                logger.warning(
+                    f"[TURN_WATCHDOG] Turn {expected_turn} did not advance within "
+                    f"{timeout:.1f}s — force-advancing"
+                )
+                self.turn_gate.reset_for_reconnection()
+                self.turn_gate.clear_pending()
+                await self.turn_gate._on_turn_ready(
+                    "[NO RESPONSE - WATCHDOG TIMEOUT]"
+                )
+        except asyncio.CancelledError:
+            pass
 
     async def _queue_next_turn(self):
         """Queue audio for the next turn."""
@@ -1987,6 +2033,7 @@ class NovaSonicPipeline:
                     logger.info("Using LLMRunFrame for Nova 2 Sonic")
                     await self.task.queue_frames([LLMRunFrame()])
                 logger.info(f"Triggered assistant response for turn {self.turn_idx}")
+                self._start_turn_watchdog(audio_duration_sec)
             except Exception as e:
                 logger.exception(f"Failed to queue audio for turn {self.turn_idx}: {e}")
                 # Fall back to text
@@ -2074,6 +2121,7 @@ class NovaSonicPipeline:
                     logger.info("[Reconnect] Using LLMRunFrame for Nova 2 Sonic")
                     await self.task.queue_frames([LLMRunFrame()])
                 logger.info(f"[Reconnect] Triggered assistant response for turn {self.turn_idx}")
+                self._start_turn_watchdog(audio_duration_sec)
             except Exception as e:
                 logger.exception(
                     f"[Reconnect] Failed to queue audio for turn {self.turn_idx}: {e}"
