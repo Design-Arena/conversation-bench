@@ -24,12 +24,12 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSTextFrame,
 )
-from multi_turn_eval.processors.audio_buffer import WallClockAlignedAudioBufferProcessor
+from audio_arena.processors.audio_buffer import WallClockAlignedAudioBufferProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
 from pipecat.transports.base_transport import TransportParams
 
-from multi_turn_eval.transports.null_audio_output import NullAudioOutputTransport
+from audio_arena.transports.null_audio_output import NullAudioOutputTransport
 
 
 class AudioBuffer:
@@ -1292,6 +1292,7 @@ class NovaSonicPipeline:
         service_class=None,
         service_name=None,
         turn_indices=None,
+        rehydration_turns=None,
     ) -> None:
         """Run the complete benchmark.
 
@@ -1301,6 +1302,10 @@ class NovaSonicPipeline:
             service_class: Ignored for Nova Sonic (we create our own LLM).
             service_name: Ignored for Nova Sonic (we create our own LLM).
             turn_indices: Optional list of turn indices to run (for debugging).
+            rehydration_turns: Optional golden turns to inject as prior context.
+                When set, the pipeline runs in single-step rehydration mode: the golden
+                history is appended to the system instruction, and only the target turn(s)
+                specified by ``turn_indices`` are executed live.
         """
         import os
         import soundfile as sf
@@ -1311,12 +1316,13 @@ class NovaSonicPipeline:
         from pipecat.processors.aggregators.llm_context import LLMContext
         from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 
-        from multi_turn_eval.processors.tool_call_recorder import ToolCallRecorder
-        from multi_turn_eval.transports.paced_input import PacedInputTransport
+        from audio_arena.processors.tool_call_recorder import ToolCallRecorder
+        from audio_arena.transports.paced_input import PacedInputTransport
 
         self.recorder = recorder
         self.model_name = model
         self._turn_indices = turn_indices
+        self._rehydration_turns = rehydration_turns
 
         # Validate AWS credentials
         if not (self._aws_access_key_id and self._aws_secret_access_key):
@@ -1341,6 +1347,16 @@ class NovaSonicPipeline:
             )
         else:
             nova_sonic_system_instruction = system_instruction
+
+        if self._rehydration_turns:
+            from audio_arena.pipelines.base import BasePipeline
+            _, instruction_suffix = BasePipeline.build_rehydration_history(self._rehydration_turns)
+            nova_sonic_system_instruction = nova_sonic_system_instruction + instruction_suffix
+            logger.info(
+                f"[Rehydration] Enriched system instruction with {len(self._rehydration_turns)} "
+                f"golden turns ({len(nova_sonic_system_instruction)} chars total)"
+            )
+
         logger.info(f"Using full system instruction ({len(nova_sonic_system_instruction)} chars)")
 
         # Create Nova Sonic LLM service
@@ -1975,19 +1991,43 @@ class NovaSonicPipeline:
             self._turn_watchdog_task = None
 
     async def _turn_watchdog(self, timeout: float, expected_turn: int):
-        """Watchdog: if turn hasn't advanced after timeout, force-advance."""
+        """Watchdog: if turn hasn't advanced after timeout, force-advance.
+
+        Nova Sonic generates verbose responses whose paced audio playback can
+        exceed the initial timeout.  When text has been accumulated (meaning
+        the model IS responding), we extend the watchdog in 30-second
+        increments instead of immediately force-advancing, giving the
+        NullAudioOutputTransport time to finish pacing the audio and fire
+        BotStoppedSpeakingFrame naturally.
+        """
+        EXTENSION_INTERVAL = 30.0  # seconds per extension
+        MAX_EXTENSIONS = 4         # up to 2 extra minutes of pacing
         try:
             await asyncio.sleep(timeout)
-            if self.turn_idx == expected_turn and not self.done:
+            extensions = 0
+            while self.turn_idx == expected_turn and not self.done:
+                has_text = bool(self.turn_gate._response_text)
+                is_active = self.turn_gate._response_active
+                if (has_text or is_active) and extensions < MAX_EXTENSIONS:
+                    extensions += 1
+                    logger.info(
+                        f"[TURN_WATCHDOG] Turn {expected_turn}: model responded "
+                        f"({len(self.turn_gate._response_text)} chars), audio still "
+                        f"pacing — extending watchdog (ext {extensions}/{MAX_EXTENSIONS})"
+                    )
+                    await asyncio.sleep(EXTENSION_INTERVAL)
+                    continue
+
                 logger.warning(
                     f"[TURN_WATCHDOG] Turn {expected_turn} did not advance within "
-                    f"{timeout:.1f}s — force-advancing"
+                    f"{timeout + extensions * EXTENSION_INTERVAL:.1f}s — force-advancing"
                 )
                 self.turn_gate.reset_for_reconnection()
                 self.turn_gate.clear_pending()
                 await self.turn_gate._on_turn_ready(
                     "[NO RESPONSE - WATCHDOG TIMEOUT]"
                 )
+                break
         except asyncio.CancelledError:
             pass
 

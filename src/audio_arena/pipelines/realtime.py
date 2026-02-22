@@ -618,9 +618,20 @@ class RealtimePipeline(BasePipeline):
             if not api_key:
                 raise EnvironmentError("OPENAI_API_KEY environment variable is required")
 
+            audio_config = rt_events.AudioConfiguration(
+                input=rt_events.AudioInput(
+                    turn_detection=rt_events.TurnDetection(
+                        type="server_vad",
+                        threshold=0.7,
+                        prefix_padding_ms=500,
+                        silence_duration_ms=800,
+                    )
+                )
+            )
             session_props = rt_events.SessionProperties(
                 instructions=system_instruction,
                 tools=tools,
+                audio=audio_config,
             )
             kwargs = dict(
                 api_key=api_key,
