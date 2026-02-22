@@ -1,8 +1,9 @@
 """Audio Arena: Multi-turn voice AI evaluation framework CLI.
 
 Usage:
-    uv run audio-arena run conversation_bench --model claude-sonnet-4-5 --service anthropic
-    uv run audio-arena judge runs/conversation_bench/20251213T123456_claude-sonnet-4-5
+    uv run audio-arena run grocery_bench --model gpt-realtime
+    uv run audio-arena run grocery_bench --model nova-sonic --rehydrate
+    uv run audio-arena judge runs/grocery_bench/20251213T123456_gpt-realtime
     uv run audio-arena list-benchmarks
 """
 
@@ -43,6 +44,19 @@ SERVICE_ALIASES = {
 
 
 # ============================================================================
+# Model Aliases — friendly names → (actual_api_model, default_service, default_pipeline)
+# ============================================================================
+
+MODEL_ALIASES: dict[str, tuple[str, Optional[str], Optional[str]]] = {
+    "gpt-realtime":      ("gpt-realtime",                     "openai-realtime",   None),
+    "gemini-native-audio": ("gemini-2.5-flash-native-audio",  "gemini-live",       None),
+    "ultravox":          ("ultravox-v0.7",                     "ultravox-realtime", None),
+    "grok-realtime":     ("grok-realtime",                     None,               None),
+    "nova-sonic":        ("amazon.nova-2-sonic-v1:0",          None,               "nova-sonic"),
+}
+
+
+# ============================================================================
 # Pipeline Registry
 # ============================================================================
 
@@ -57,6 +71,26 @@ PIPELINE_CLASSES = {
 # ============================================================================
 # Utility Functions
 # ============================================================================
+
+
+def resolve_model_alias(
+    model: str,
+    service: Optional[str] = None,
+    pipeline: Optional[str] = None,
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Resolve a model alias to (actual_model, service, pipeline).
+
+    If the model is a known alias, fills in service/pipeline defaults
+    (only when not explicitly provided by the caller).
+    """
+    if model in MODEL_ALIASES:
+        actual_model, default_service, default_pipeline = MODEL_ALIASES[model]
+        return (
+            actual_model,
+            service or default_service,
+            pipeline or default_pipeline,
+        )
+    return model, service, pipeline
 
 
 def load_service_class(service: str) -> type:
@@ -194,12 +228,17 @@ def run(
 ):
     """Run a benchmark against an LLM.
 
+    Model aliases (auto-fill service & pipeline):
+        gpt-realtime, gemini-native-audio, ultravox, grok-realtime, nova-sonic
+
     Examples:
+        uv run audio-arena run conversation_bench --model gpt-realtime
+        uv run audio-arena run conversation_bench --model nova-sonic
+        uv run audio-arena run conversation_bench --model gemini-native-audio --rehydrate
         uv run audio-arena run conversation_bench --model claude-sonnet-4-5 --service anthropic
-        uv run audio-arena run conversation_bench --model gpt-4o --service openai
-        uv run audio-arena run grocery_bench --model gpt-4o --service openai --rehydrate
-        uv run audio-arena run grocery_bench --model gpt-4o --service openai --rehydrate --only-turns 5,10,15
     """
+    model, service, pipeline = resolve_model_alias(model, service, pipeline)
+
     if rehydrate:
         asyncio.run(
             _run_rehydrated(benchmark_name, model, service, pipeline, only_turns, verbose)
