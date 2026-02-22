@@ -5,9 +5,10 @@ Each pipeline type (text, realtime, nova-sonic) handles its own specifics.
 """
 
 import asyncio
+import json
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -55,6 +56,8 @@ class BasePipeline(ABC):
         self.model_name: Optional[str] = None
         self.service_name: Optional[str] = None
         self._turn_indices: Optional[List[int]] = None
+        # Golden turns to inject as context before the target turn (single-step rehydration)
+        self._rehydration_turns: Optional[List[Dict[str, Any]]] = None
         # Track tool calls to detect duplicates within a turn
         self._seen_tool_calls: set = set()
         # Track tool_call_ids that are duplicates (for filtering in ToolCallRecorder)
@@ -63,6 +66,62 @@ class BasePipeline(ABC):
         self._tool_response_idx: int = 0
         # Last tool result (for explicit delivery to GPT/Grok Realtime APIs; see docstring below)
         self._last_tool_result: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def build_rehydration_history(
+        golden_turns: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Build rehydration context from golden turns for single-step evaluation.
+
+        Converts golden turn definitions into two formats:
+        - A messages list (user/assistant pairs) for text pipeline LLMContext injection.
+        - A formatted instruction string for realtime pipeline system-instruction enrichment.
+
+        Args:
+            golden_turns: The benchmark turns list sliced to ``turns[0:target_turn_idx]``.
+
+        Returns:
+            ``(messages, instruction_string)`` tuple.
+        """
+        messages: List[Dict[str, Any]] = []
+        lines = [
+            "\n\n--- CONVERSATION HISTORY (GOLDEN) ---",
+            "The following is the conversation so far. The user's name, "
+            "preferences, and any actions you have taken (tool calls, "
+            "registrations, schedule changes, etc.) are still in effect. "
+            "Continue naturally.",
+            "",
+        ]
+
+        for i, turn in enumerate(golden_turns):
+            user_input = turn.get("input", "")
+            golden_text = turn.get("golden_text", "")
+            fc = turn.get("required_function_call")
+            fc_response = turn.get("function_call_response")
+
+            messages.append({"role": "user", "content": user_input})
+            lines.append(f"User: {user_input}")
+
+            if fc is not None:
+                calls = fc if isinstance(fc, list) else [fc]
+                responses = (
+                    fc_response
+                    if isinstance(fc_response, list)
+                    else [fc_response] if fc_response is not None else []
+                )
+                for j, call in enumerate(calls):
+                    lines.append(
+                        f"  [Tool call: {call['name']}({json.dumps(call.get('args', {}))})]"
+                    )
+                    if j < len(responses):
+                        lines.append(f"  [Tool result: {json.dumps(responses[j])}]")
+
+            messages.append({"role": "assistant", "content": golden_text})
+            lines.append(f"Assistant: {golden_text}")
+            lines.append("")
+
+        instruction_string = "\n".join(lines)
+        return messages, instruction_string
 
     @property
     def effective_turns(self) -> List[dict]:
@@ -78,6 +137,7 @@ class BasePipeline(ABC):
         service_class: Optional[type] = None,
         service_name: Optional[str] = None,
         turn_indices: Optional[List[int]] = None,
+        rehydration_turns: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Run the complete benchmark. Pipeline handles everything internally.
 
@@ -87,11 +147,16 @@ class BasePipeline(ABC):
             service_class: LLM service class (required unless pipeline sets requires_service=False).
             service_name: Service name/alias (e.g., "openai", "openrouter").
             turn_indices: Optional list of turn indices to run (for debugging).
+            rehydration_turns: Optional golden turns to inject as prior context.
+                When set, the pipeline runs in single-step rehydration mode: the golden
+                history is injected into the model context, and only the target turn(s)
+                specified by ``turn_indices`` are executed live.
         """
         self.recorder = recorder
         self.model_name = model
         self.service_name = service_name  # Store for use in _create_llm overrides
         self._turn_indices = turn_indices
+        self._rehydration_turns = rehydration_turns
 
         # Create LLM service
         self.llm = self._create_llm(service_class, model)

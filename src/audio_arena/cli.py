@@ -177,6 +177,11 @@ def cli():
     help="Pipeline type (text, realtime, nova-sonic). Auto-detected if not specified.",
 )
 @click.option("--only-turns", help="Comma-separated turn indices to run (e.g., 0,1,2)")
+@click.option(
+    "--rehydrate",
+    is_flag=True,
+    help="Single-step rehydration mode: evaluate each turn independently with golden prior context.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def run(
     benchmark_name: str,
@@ -184,6 +189,7 @@ def run(
     service: Optional[str],
     pipeline: Optional[str],
     only_turns: Optional[str],
+    rehydrate: bool,
     verbose: bool,
 ):
     """Run a benchmark against an LLM.
@@ -191,9 +197,15 @@ def run(
     Examples:
         uv run audio-arena run conversation_bench --model claude-sonnet-4-5 --service anthropic
         uv run audio-arena run conversation_bench --model gpt-4o --service openai
-        uv run audio-arena run conversation_bench --model gpt-realtime --service openai-realtime --pipeline realtime
+        uv run audio-arena run grocery_bench --model gpt-4o --service openai --rehydrate
+        uv run audio-arena run grocery_bench --model gpt-4o --service openai --rehydrate --only-turns 5,10,15
     """
-    asyncio.run(_run(benchmark_name, model, service, pipeline, only_turns, verbose))
+    if rehydrate:
+        asyncio.run(
+            _run_rehydrated(benchmark_name, model, service, pipeline, only_turns, verbose)
+        )
+    else:
+        asyncio.run(_run(benchmark_name, model, service, pipeline, only_turns, verbose))
 
 
 async def _run(
@@ -261,30 +273,141 @@ async def _run(
         recorder.close()
 
 
+async def _run_rehydrated(
+    benchmark_name: str,
+    model: str,
+    service: Optional[str],
+    pipeline_type: Optional[str],
+    only_turns: Optional[str],
+    verbose: bool,
+):
+    """Run benchmark in single-step rehydration mode.
+
+    Each turn is evaluated independently: the model receives golden conversation
+    history for all prior turns, then live audio/text for the target turn only.
+    A fresh API session is created per turn to ensure complete isolation.
+    """
+    from audio_arena.recording.transcript_recorder import TranscriptRecorder
+
+    BenchmarkConfig = load_benchmark(benchmark_name)
+    benchmark = BenchmarkConfig()
+    all_turns = benchmark.turns
+
+    if not pipeline_type:
+        pipeline_type = infer_pipeline(model)
+        click.echo(f"Auto-detected pipeline: {pipeline_type}")
+
+    pipeline_cls = get_pipeline_class(pipeline_type)
+
+    requires_service = getattr(pipeline_cls, "requires_service", True)
+    if requires_service and not service:
+        raise click.UsageError(f"--service is required for {pipeline_type} pipeline")
+
+    service_class = load_service_class(service) if service else None
+
+    run_dir = create_run_directory(benchmark_name, model)
+    click.echo(f"Output directory: {run_dir}")
+    click.echo(f"Mode: single-step rehydration ({len(all_turns)} total turns)")
+
+    setup_logging(run_dir, verbose)
+
+    target_indices = list(range(len(all_turns)))
+    if only_turns:
+        target_indices = [int(i.strip()) for i in only_turns.split(",")]
+        click.echo(f"Evaluating turns: {target_indices}")
+
+    succeeded = 0
+    failed_turns = []
+
+    for target_idx in target_indices:
+        golden_history = all_turns[:target_idx] if target_idx > 0 else None
+        click.echo(
+            f"[Rehydration] Turn {target_idx}/{len(all_turns) - 1}"
+            + (f" (rehydrating {len(golden_history)} golden turns)" if golden_history else "")
+        )
+
+        recorder = TranscriptRecorder(run_dir, model)
+        pipeline_instance = pipeline_cls(benchmark)
+
+        try:
+            await pipeline_instance.run(
+                recorder=recorder,
+                model=model,
+                service_class=service_class,
+                service_name=service,
+                turn_indices=[target_idx],
+                rehydration_turns=golden_history,
+            )
+            succeeded += 1
+        except Exception as e:
+            logger.exception(f"Turn {target_idx} failed: {e}")
+            click.echo(f"  Turn {target_idx} FAILED: {e}")
+            failed_turns.append(target_idx)
+        finally:
+            recorder.close()
+
+    # Write final runtime summary covering all turns
+    runtime = {
+        "model_name": model,
+        "turns": succeeded,
+        "total_attempted": len(target_indices),
+        "failed_turns": failed_turns,
+        "mode": "rehydrated",
+        "note": "Single-step rehydration: each turn evaluated independently with golden prior context",
+    }
+    (run_dir / "runtime.json").write_text(
+        json.dumps(runtime, indent=2), encoding="utf-8"
+    )
+
+    click.echo(f"\nCompleted rehydrated run: {succeeded}/{len(target_indices)} turns succeeded")
+    if failed_turns:
+        click.echo(f"  Failed turns: {failed_turns}")
+    click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
+
+
+NON_CONVO_BENCHMARKS = {"appointment_bench", "event_bench", "grocery_bench"}
+
+
 @cli.command()
 @click.argument("run_dir", type=click.Path(exists=True))
 @click.option("--only-turns", help="Comma-separated turn indices to judge (e.g., 0,1,2)")
-@click.option("--judge-model", default="claude-opus-4-5", help="Model for judging")
+@click.option(
+    "--judge",
+    "judge_backend",
+    type=click.Choice(["claude", "openai"], case_sensitive=False),
+    default=None,
+    help="Judge backend to use. Defaults to 'openai' for non-convo benchmarks, 'claude' for conversation_bench.",
+)
+@click.option("--judge-model", default=None, help="Model for judging (default: claude-opus-4-5 or o3)")
 @click.option("--skip-turn-taking", is_flag=True, help="Skip audio turn-taking analysis (faster; all turns count as turn_taking=True)")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def judge(
     run_dir: str,
     only_turns: Optional[str],
-    judge_model: str,
+    judge_backend: Optional[str],
+    judge_model: Optional[str],
     skip_turn_taking: bool,
     debug: bool,
 ):
     """Judge a completed benchmark run.
 
     Examples:
-        uv run audio-arena judge runs/conversation_bench/20251213T123456_claude-sonnet-4-5
-        uv run audio-arena judge runs/conversation_bench/20251213T123456_claude-sonnet-4-5 --only-turns 0,1,2
-        uv run audio-arena judge runs/.../run_dir --skip-turn-taking
+        uv run audio-arena judge runs/grocery_bench/20251213T123456_gpt-4o
+        uv run audio-arena judge runs/conversation_bench/... --judge claude
+        uv run audio-arena judge runs/appointment_bench/... --judge openai --judge-model gpt-4.1
     """
     run_path = Path(run_dir)
 
     # Infer benchmark from path: runs/{benchmark}/{timestamp}_{model}/
     benchmark_name = run_path.parent.name
+
+    # Auto-select judge backend based on benchmark type
+    if judge_backend is None:
+        if benchmark_name in NON_CONVO_BENCHMARKS:
+            judge_backend = "openai"
+        else:
+            judge_backend = "claude"
+    click.echo(f"Using {judge_backend} judge for {benchmark_name}")
 
     # Load transcript
     transcript_path = run_path / "transcript.jsonl"
@@ -296,62 +419,111 @@ def judge(
     if only_turns:
         turn_indices_set = {int(i.strip()) for i in only_turns.split(",")}
 
-    # Load benchmark for expected turns
+    # Load benchmark for expected turns and get_relevant_dimensions
+    get_relevant_dimensions_fn = None
     try:
         BenchmarkConfig = load_benchmark(benchmark_name)
         benchmark = BenchmarkConfig()
         expected_turns = benchmark.turns
+        benchmark_turns_module = importlib.import_module(f"benchmarks.{benchmark_name}.turns")
+        get_relevant_dimensions_fn = getattr(benchmark_turns_module, 'get_relevant_dimensions', None)
     except Exception:
-        # Fall back to shared turns module
         click.echo(f"Could not load benchmark '{benchmark_name}', using shared turns module")
         from benchmarks.conversation_bench.turns import turns as expected_turns
 
-    # Run judge
-    from audio_arena.judging.claude_judge import judge_with_claude, load_transcript, write_outputs
+    # Load shared utilities
+    from audio_arena.judging.llm_judge import load_transcript, write_outputs
 
     records = load_transcript(run_path)
     if turn_indices_set is not None:
         records = [r for r in records if r["turn"] in turn_indices_set]
 
-    try:
-        result = asyncio.run(
-            judge_with_claude(
-                run_path,
-                only_turns=turn_indices_set,
-                debug=debug,
-                expected_turns=expected_turns,
-                skip_turn_taking=skip_turn_taking,
-            )
-        )
-    except Exception as e:
-        raise click.ClickException(f"Judgment failed: {e}")
+    if judge_backend == "openai":
+        from audio_arena.judging.openai_judge import judge_with_openai, OPENAI_JUDGE_VERSION, OPENAI_JUDGE_MODEL
 
-    # Write outputs (expected_turns so non-tool turns count as tool pass)
-    write_outputs(
-        run_path,
-        records,
-        result["judgments"],
-        result["summary"],
-        result["model_name"],
-        result.get("realignment_notes", ""),
-        result.get("function_tracking", {}),
-        result.get("turn_taking_analysis"),
-        expected_turns=expected_turns,
-    )
+        effective_model = judge_model or OPENAI_JUDGE_MODEL
+        try:
+            result = asyncio.run(
+                judge_with_openai(
+                    run_path,
+                    only_turns=turn_indices_set,
+                    debug=debug,
+                    expected_turns=expected_turns,
+                    skip_turn_taking=skip_turn_taking,
+                    get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+                    model=judge_model,
+                )
+            )
+        except Exception as e:
+            raise click.ClickException(f"Judgment failed: {e}")
+
+        write_outputs(
+            run_path,
+            records,
+            result["judgments"],
+            result["summary"],
+            result["model_name"],
+            result.get("realignment_notes", ""),
+            result.get("function_tracking", {}),
+            result.get("turn_taking_analysis"),
+            expected_turns=expected_turns,
+            judge_name="openai",
+            judge_version=OPENAI_JUDGE_VERSION,
+            judge_model=result.get("judge_model", effective_model),
+        )
+        summary_file = "openai_summary.json"
+
+    else:
+        from audio_arena.judging.llm_judge import judge_with_claude
+
+        try:
+            result = asyncio.run(
+                judge_with_claude(
+                    run_path,
+                    only_turns=turn_indices_set,
+                    debug=debug,
+                    expected_turns=expected_turns,
+                    skip_turn_taking=skip_turn_taking,
+                    get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+                )
+            )
+        except Exception as e:
+            raise click.ClickException(f"Judgment failed: {e}")
+
+        write_outputs(
+            run_path,
+            records,
+            result["judgments"],
+            result["summary"],
+            result["model_name"],
+            result.get("realignment_notes", ""),
+            result.get("function_tracking", {}),
+            result.get("turn_taking_analysis"),
+            expected_turns=expected_turns,
+            judge_name="claude",
+        )
+        summary_file = "claude_summary.json"
 
     # Print summary
-    summary_path = run_path / "claude_summary.json"
+    summary_path = run_path / summary_file
     summary = json.loads(summary_path.read_text())
-    passes = summary.get("claude_passes", {})
+    passes = summary.get("passes", summary.get("claude_passes", {}))
     total = summary.get("turns_scored", 0)
 
-    click.echo(f"Judged {total} turns (with turn-taking analysis)")
+    click.echo(f"\nJudged {total} turns (with turn-taking analysis)")
     click.echo(f"  Turn-taking: {passes.get('turn_taking', total)}/{total}")
     click.echo(f"  Tool use: {passes.get('tool_use_correct', 0)}/{total}")
     click.echo(f"  Instruction following: {passes.get('instruction_following', 0)}/{total}")
     click.echo(f"  KB grounding: {passes.get('kb_grounding', 0)}/{total}")
 
-    # Report turn-taking failures if any
+    category_totals = summary.get("category_totals", {})
+    amb_total = category_totals.get("ambiguity_handling", 0)
+    state_total = category_totals.get("state_tracking", 0)
+    if amb_total:
+        click.echo(f"  Ambiguity handling: {passes.get('ambiguity_handling', 0)}/{amb_total}")
+    if state_total:
+        click.echo(f"  State tracking: {passes.get('state_tracking', 0)}/{state_total}")
+
     turn_taking_failures = summary.get("turn_taking_failures", [])
     if turn_taking_failures:
         click.echo(f"\nTurn-taking failures: {turn_taking_failures}")
