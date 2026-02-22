@@ -49,7 +49,7 @@ SERVICE_ALIASES = {
 
 MODEL_ALIASES: dict[str, tuple[str, Optional[str], Optional[str]]] = {
     "gpt-realtime":      ("gpt-realtime",                     "openai-realtime",   None),
-    "gemini-native-audio": ("gemini-2.5-flash-native-audio",  "gemini-live",       None),
+    "gemini-native-audio": ("gemini-2.5-flash-native-audio-preview-12-2025", "gemini-live", None),
     "ultravox":          ("ultravox-v0.7",                     "ultravox-realtime", None),
     "grok-realtime":     ("grok-realtime",                     None,               None),
     "nova-sonic":        ("amazon.nova-2-sonic-v1:0",          None,               "nova-sonic"),
