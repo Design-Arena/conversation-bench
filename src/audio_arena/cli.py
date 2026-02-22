@@ -216,6 +216,12 @@ def cli():
     is_flag=True,
     help="Single-step rehydration mode: evaluate each turn independently with golden prior context.",
 )
+@click.option(
+    "--parallel",
+    type=int,
+    default=1,
+    help="Max concurrent turns in rehydrated mode (default: 1 = sequential). Ignored for normal runs.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def run(
     benchmark_name: str,
@@ -224,6 +230,7 @@ def run(
     pipeline: Optional[str],
     only_turns: Optional[str],
     rehydrate: bool,
+    parallel: int,
     verbose: bool,
 ):
     """Run a benchmark against an LLM.
@@ -241,7 +248,7 @@ def run(
 
     if rehydrate:
         asyncio.run(
-            _run_rehydrated(benchmark_name, model, service, pipeline, only_turns, verbose)
+            _run_rehydrated(benchmark_name, model, service, pipeline, only_turns, verbose, parallel)
         )
     else:
         asyncio.run(_run(benchmark_name, model, service, pipeline, only_turns, verbose))
@@ -319,12 +326,15 @@ async def _run_rehydrated(
     pipeline_type: Optional[str],
     only_turns: Optional[str],
     verbose: bool,
+    max_parallel: int = 1,
 ):
     """Run benchmark in single-step rehydration mode.
 
     Each turn is evaluated independently: the model receives golden conversation
     history for all prior turns, then live audio/text for the target turn only.
     A fresh API session is created per turn to ensure complete isolation.
+
+    When max_parallel > 1, turns run concurrently up to the given limit.
     """
     from audio_arena.recording.transcript_recorder import TranscriptRecorder
 
@@ -346,7 +356,11 @@ async def _run_rehydrated(
 
     run_dir = create_run_directory(benchmark_name, model)
     click.echo(f"Output directory: {run_dir}")
-    click.echo(f"Mode: single-step rehydration ({len(all_turns)} total turns)")
+    mode_desc = f"single-step rehydration ({len(all_turns)} total turns"
+    if max_parallel > 1:
+        mode_desc += f", {max_parallel} concurrent"
+    mode_desc += ")"
+    click.echo(f"Mode: {mode_desc}")
 
     setup_logging(run_dir, verbose)
 
@@ -355,43 +369,54 @@ async def _run_rehydrated(
         target_indices = [int(i.strip()) for i in only_turns.split(",")]
         click.echo(f"Evaluating turns: {target_indices}")
 
-    succeeded = 0
-    failed_turns = []
+    results: dict[int, bool] = {}
 
-    for target_idx in target_indices:
-        golden_history = all_turns[:target_idx] if target_idx > 0 else None
-        click.echo(
-            f"[Rehydration] Turn {target_idx}/{len(all_turns) - 1}"
-            + (f" (rehydrating {len(golden_history)} golden turns)" if golden_history else "")
-        )
-
-        recorder = TranscriptRecorder(run_dir, model)
-        pipeline_instance = pipeline_cls(benchmark)
-
-        try:
-            await pipeline_instance.run(
-                recorder=recorder,
-                model=model,
-                service_class=service_class,
-                service_name=service,
-                turn_indices=[target_idx],
-                rehydration_turns=golden_history,
+    async def _run_single_turn(
+        semaphore: asyncio.Semaphore,
+        target_idx: int,
+    ):
+        async with semaphore:
+            golden_history = all_turns[:target_idx] if target_idx > 0 else None
+            click.echo(
+                f"[Rehydration] Turn {target_idx}/{len(all_turns) - 1}"
+                + (f" (rehydrating {len(golden_history)} golden turns)" if golden_history else "")
             )
-            succeeded += 1
-        except Exception as e:
-            logger.exception(f"Turn {target_idx} failed: {e}")
-            click.echo(f"  Turn {target_idx} FAILED: {e}")
-            failed_turns.append(target_idx)
-        finally:
-            recorder.close()
 
-    # Write final runtime summary covering all turns
+            recorder = TranscriptRecorder(run_dir, model)
+            pipeline_instance = pipeline_cls(benchmark)
+
+            try:
+                await pipeline_instance.run(
+                    recorder=recorder,
+                    model=model,
+                    service_class=service_class,
+                    service_name=service,
+                    turn_indices=[target_idx],
+                    rehydration_turns=golden_history,
+                )
+                results[target_idx] = True
+                click.echo(f"[Rehydration] Turn {target_idx} OK")
+            except Exception as e:
+                logger.exception(f"Turn {target_idx} failed: {e}")
+                click.echo(f"  Turn {target_idx} FAILED: {e}")
+                results[target_idx] = False
+            finally:
+                recorder.close()
+
+    semaphore = asyncio.Semaphore(max_parallel)
+    tasks = [_run_single_turn(semaphore, idx) for idx in target_indices]
+    await asyncio.gather(*tasks)
+
+    succeeded = sum(1 for v in results.values() if v)
+    failed_turns = sorted(idx for idx, ok in results.items() if not ok)
+
     runtime = {
         "model_name": model,
         "turns": succeeded,
         "total_attempted": len(target_indices),
         "failed_turns": failed_turns,
         "mode": "rehydrated",
+        "parallel": max_parallel,
         "note": "Single-step rehydration: each turn evaluated independently with golden prior context",
     }
     (run_dir / "runtime.json").write_text(
