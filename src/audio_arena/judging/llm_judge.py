@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Claude Agent SDK-based transcript judge (realignment + over-clarification handling).
+LLM-based transcript judge (realignment + over-clarification handling).
+
+Shared evaluation logic for all judge backends (Claude, OpenAI, etc.).
+Contains the system prompt, turn formatting, output writing, and the Claude judge implementation.
 
 Handles turn misalignment:
 - Early function calls: call at turn N instead of expected N+1; later turns not penalized.
@@ -12,6 +15,7 @@ Uses a two-phase approach:
 
 Usage via CLI:
     uv run audio-arena judge runs/conversation_bench/20251215T202910_gemini-...
+    uv run audio-arena judge runs/... --judge openai
     uv run audio-arena judge runs/... --only-turns 0,1,2
     uv run audio-arena judge runs/... --debug
 """
@@ -278,11 +282,12 @@ def load_transcript(run_dir: Path) -> List[Dict[str, Any]]:
 # Turn Formatting
 # ============================================================================
 
-def format_turns_for_claude(
+def format_turns_for_judge(
     records: List[Dict[str, Any]],
     expected_turns: List[Dict[str, Any]],
     only_turns: Optional[set[int]] = None,
     turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None,
+    get_relevant_dimensions_fn=None,
 ) -> str:
     """Format conversation turns with full context for realignment analysis.
 
@@ -291,6 +296,8 @@ def format_turns_for_claude(
         expected_turns: List of expected turn data
         only_turns: Optional set of turn indices to include
         turn_taking_data: Optional dict mapping turn index to turn-taking analysis
+        get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
+            If not provided, falls back to conversation_bench.
     """
     lines = []
 
@@ -376,9 +383,11 @@ def format_turns_for_claude(
             subcategory = expected.get('subcategory', '')
             if subcategory:
                 lines.append(f"**Subcategory**: {subcategory}")
-            # Tell Claude which dimensions to actually score for this turn
-            from benchmarks.conversation_bench.turns import get_relevant_dimensions
-            relevant_dims = get_relevant_dimensions(expected)
+            dims_fn = get_relevant_dimensions_fn
+            if dims_fn is None:
+                from benchmarks.conversation_bench.turns import get_relevant_dimensions
+                dims_fn = get_relevant_dimensions
+            relevant_dims = dims_fn(expected)
             lines.append(f"**Score Dimensions**: {', '.join(relevant_dims)}")
             lines.append("")
 
@@ -415,6 +424,7 @@ async def judge_with_claude(
     debug: bool = False,
     expected_turns: Optional[List[Dict[str, Any]]] = None,
     skip_turn_taking: bool = False,
+    get_relevant_dimensions_fn=None,
 ) -> Dict[str, Any]:
     """Main judging function using two-phase realignment approach.
 
@@ -424,6 +434,7 @@ async def judge_with_claude(
         debug: Enable debug logging
         expected_turns: Optional list of expected turns. If not provided, imports from turns module.
         skip_turn_taking: If True, skip turn-taking analysis (for runs without WAV files)
+        get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
 
     Returns:
         Dict with judgments, realignment_notes, function_tracking, turn_taking_analysis, summary, and model_name.
@@ -474,7 +485,7 @@ async def judge_with_claude(
                     print(f"Turn-taking analysis failed: {e}", file=sys.stderr)
 
     # Format turns (with turn-taking data if available)
-    formatted_turns = format_turns_for_claude(records, expected_turns, only_turns, turn_taking_data)
+    formatted_turns = format_turns_for_judge(records, expected_turns, only_turns, turn_taking_data, get_relevant_dimensions_fn)
 
     # Create prompt
     prompt = f"""{formatted_turns}
@@ -617,6 +628,9 @@ def write_outputs(
     function_tracking: Optional[Dict[str, Any]] = None,
     turn_taking_analysis: Optional[Dict[str, Any]] = None,
     expected_turns: Optional[List[Dict[str, Any]]] = None,
+    judge_name: str = "claude",
+    judge_version: Optional[str] = None,
+    judge_model: Optional[str] = None,
 ) -> None:
     """Write all output files.
 
@@ -631,26 +645,33 @@ def write_outputs(
         turn_taking_analysis: Optional turn-taking analysis result (v4 feature)
         expected_turns: Optional list of benchmark turns (index = turn number). Used so
             turns with no required_function_call count as tool pass even if LLM returned false.
+        judge_name: Prefix for output filenames (default "claude" for backward compat).
+        judge_version: Judge version string. Defaults to module-level JUDGE_VERSION.
+        judge_model: Judge model string. Defaults to module-level JUDGE_MODEL.
     """
+    if judge_version is None:
+        judge_version = JUDGE_VERSION
+    if judge_model is None:
+        judge_model = JUDGE_MODEL
     if function_tracking is None:
         function_tracking = {}
 
-    # 1. claude_judged.jsonl
-    with (run_dir / "claude_judged.jsonl").open("w", encoding="utf-8") as f:
+    # 1. {judge_name}_judged.jsonl
+    with (run_dir / f"{judge_name}_judged.jsonl").open("w", encoding="utf-8") as f:
         for rec in records:
             turn = rec["turn"]
             judgment = judgments[turn]
             output_rec = {
                 **rec,
                 "scores": judgment["scores"],
-                "claude_reasoning": judgment["reasoning"],
+                "judge_reasoning": judgment["reasoning"],
             }
             # Include turn-taking issues if present
             if "turn_taking_issues" in judgment:
                 output_rec["turn_taking_issues"] = judgment["turn_taking_issues"]
             f.write(json.dumps(output_rec, ensure_ascii=False) + "\n")
 
-    # 2. claude_summary.json
+    # 2. {judge_name}_summary.json
     # Core dimensions: tool_use, instruction_following, kb_grounding are out of ALL turns (75)
     total_turns = len(judgments)
 
@@ -699,11 +720,12 @@ def write_outputs(
 
     summary_data = {
         "model_name": model_name,
-        "claude_passes": passes,
+        "judge_name": judge_name,
+        "passes": passes,
         "turns_scored": len(judgments),
-        "category_totals": totals,  # Actual number of turns scored for each category-specific dim
-        "judge_version": JUDGE_VERSION,
-        "judge_model": JUDGE_MODEL,
+        "category_totals": totals,
+        "judge_version": judge_version,
+        "judge_model": judge_model,
         "judged_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "realignment_applied": bool(function_tracking),
         "function_tracking": function_tracking,
@@ -711,20 +733,20 @@ def write_outputs(
         "turn_taking_affected_instruction": turn_taking_affected_instruction,
     }
 
-    (run_dir / "claude_summary.json").write_text(
+    (run_dir / f"{judge_name}_summary.json").write_text(
         json.dumps(summary_data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8"
     )
 
-    # 3. claude_analysis.md
+    # 3. {judge_name}_analysis.md
     total = len(judgments)
     lines = [
-        f"# Claude Agent SDK Evaluation ({JUDGE_VERSION})",
+        f"# {judge_name.title()} Evaluation ({judge_version})",
         f"",
         f"**Model**: {model_name}",
         f"**Turns**: {total}",
-        f"**Judge**: {JUDGE_MODEL}",
-        f"**Judge Version**: {JUDGE_VERSION}",
+        f"**Judge**: {judge_model}",
+        f"**Judge Version**: {judge_version}",
         f"**Judged**: {summary_data['judged_at']}",
         f"",
         f"## Summary Metrics",
@@ -808,13 +830,13 @@ def write_outputs(
             if "turn_taking" in failed_dimensions and "turn_taking_issues" in judgment:
                 lines.append(f"**Turn-Taking Issues**: {', '.join(judgment['turn_taking_issues'])}")
             lines.append(f"")
-            lines.append(f"**Claude's Reasoning**: {judgment['reasoning']}")
+            lines.append(f"**Judge Reasoning**: {judgment['reasoning']}")
             lines.append(f"")
 
     if not has_failures:
         lines.append("*No failures - all turns passed all evaluation dimensions!*")
 
-    (run_dir / "claude_analysis.md").write_text(
+    (run_dir / f"{judge_name}_analysis.md").write_text(
         "\n".join(lines),
         encoding="utf-8"
     )
@@ -875,17 +897,20 @@ def main():
     if only_turns is not None:
         records = [r for r in records if r["turn"] in only_turns]
 
-    # Load expected turns for write_outputs (tool pass count)
+    # Load expected turns and get_relevant_dimensions for the correct benchmark
+    get_relevant_dimensions_fn = None
     try:
         benchmark_name = run_dir.parent.name
         from audio_arena.cli import load_benchmark
+        benchmark_module = importlib.import_module(f"benchmarks.{benchmark_name}.turns")
         expected_turns = load_benchmark(benchmark_name).turns
+        get_relevant_dimensions_fn = getattr(benchmark_module, 'get_relevant_dimensions', None)
     except Exception:
         from benchmarks.conversation_bench.turns import turns as expected_turns
 
     # Run judgment
     try:
-        result = asyncio.run(judge_with_claude(run_dir, only_turns, args.debug))
+        result = asyncio.run(judge_with_claude(run_dir, only_turns, args.debug, get_relevant_dimensions_fn=get_relevant_dimensions_fn))
     except Exception as e:
         print(f"ERROR: Judgment failed: {e}", file=sys.stderr)
         if args.debug:
