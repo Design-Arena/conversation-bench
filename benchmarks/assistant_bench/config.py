@@ -30,8 +30,10 @@ class BenchmarkConfig:
 
     @classmethod
     def get_audio_path(cls, turn_index: int) -> Path:
-        """Get the audio file path for a specific turn, downloading from HF if needed."""
+        """Get the audio file path for a specific turn."""
         if not cls.audio_dir.exists() or not any(cls.audio_dir.glob("*.wav")):
-            from audio_arena.data import ensure_audio
-            cls.audio_dir = ensure_audio(cls._benchmark_dir, cls.hf_repo)
+            raise FileNotFoundError(
+                f"No audio files found in {cls.audio_dir}. "
+                f"Generate them first: uv run python scripts/generate_audio.py {cls.name}"
+            )
         return cls.audio_dir / f"turn_{turn_index:03d}.wav"
