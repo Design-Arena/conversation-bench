@@ -1434,11 +1434,19 @@ class NovaSonicPipeline:
                 self.done = True
                 # Small delay to let tool call frames propagate through ToolCallRecorder
                 await asyncio.sleep(0.05)
-                # Write the final turn (assistant response may be empty since it's just a tool call)
-                if self.turn_idx < len(self.effective_turns):
+                # Write the current turn and all remaining turns with empty responses
+                # so that the evaluation still sees every turn (model ended early).
+                for idx in range(self.turn_idx, len(self.effective_turns)):
+                    actual_idx = self._get_actual_turn_index(idx)
+                    if idx != self.turn_idx:
+                        self.recorder.start_turn(actual_idx)
                     self.recorder.write_turn(
-                        user_text=self.effective_turns[self.turn_idx].get("input", ""),
-                        assistant_text="",
+                        user_text=self.effective_turns[idx].get("input", ""),
+                        assistant_text="[MODEL_ENDED_SESSION]" if idx == self.turn_idx else "[MODEL_ENDED_SESSION_EARLY]",
+                    )
+                    logger.info(
+                        f"end_session: wrote {'current' if idx == self.turn_idx else 'remaining'} "
+                        f"turn {actual_idx} with empty response"
                     )
                 self.recorder.write_summary()
                 await self.task.cancel()
