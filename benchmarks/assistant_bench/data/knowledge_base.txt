@@ -1,0 +1,113 @@
+
+# Atlas Personal Assistant
+
+## Overview
+Atlas Personal Assistant is a phone-based personal assistant service that helps users manage travel bookings, calendar events, reminders, and email — all through a single voice call. Atlas handles multi-step requests and keeps track of everything discussed during the conversation.
+
+## Service Hours
+- Monday–Friday: 6:00 AM – 10:00 PM (Pacific Time)
+- Saturday–Sunday: 8:00 AM – 8:00 PM (Pacific Time)
+- Holidays: Limited hours (9:00 AM – 5:00 PM)
+
+## Contact
+- **Phone:** 1-800-ATLAS-PA (1-800-285-2772)
+- **Email:** support@atlaspa.com
+
+---
+
+## Travel Booking
+
+Atlas partners with major airlines and hotel chains to search and book travel on your behalf. All prices are per person for flights and per night for hotels unless otherwise noted.
+
+### Available Flights: LAX → JFK
+
+| Flight ID | Airline       | Departure | Arrival  | Price (per person) | Stops  | Notes               |
+|-----------|---------------|-----------|----------|--------------------|--------|----------------------|
+| UA-410    | United        | 7:00 AM   | 3:30 PM  | $289               | 0      | Morning nonstop      |
+| DL-582    | Delta         | 2:30 PM   | 11:00 PM | $315               | 0      | Afternoon nonstop    |
+| AA-720    | American      | 6:15 PM   | 2:45 AM  | $265               | 0      | Red-eye arrival      |
+
+### Available Flights: LAX → SFO
+
+| Flight ID | Airline       | Departure | Arrival  | Price (per person) | Stops  |
+|-----------|---------------|-----------|----------|--------------------|--------|
+| UA-221    | United        | 9:00 AM   | 10:25 AM | $129               | 0      |
+| SW-445    | Southwest     | 12:30 PM  | 1:55 PM  | $99                | 0      |
+
+### Popular Hotels in New York City
+
+| Hotel ID | Hotel Name             | Stars | Nightly Rate | Location         | Amenities                                      |
+|----------|------------------------|-------|--------------|------------------|-------------------------------------------------|
+| NYC-MH   | The Manhattan House    | 4     | $259/night   | Midtown Manhattan| Fitness center, restaurant, business center, Wi-Fi |
+| NYC-BK   | Brooklyn Bridge Suites | 3     | $179/night   | DUMBO, Brooklyn  | Kitchenette, rooftop terrace, free Wi-Fi, laundry |
+| NYC-PK   | Park Avenue Grand      | 5     | $429/night   | Upper East Side  | Full spa, concierge, 2 restaurants, valet parking |
+
+---
+
+## Calendar Management
+
+Atlas can view, add, and modify calendar events. Below is the current calendar for the user (Dana Fischer).
+
+### Week of January 20–26, 2025
+
+| Date       | Time          | Event                          | Notes                        |
+|------------|---------------|--------------------------------|------------------------------|
+| Mon Jan 20 | 9:00 AM–10:00 AM | Team standup               | Weekly recurring              |
+| Mon Jan 20 | 2:00 PM–3:00 PM  | 1-on-1 with manager        |                               |
+| Tue Jan 21 | 10:00 AM–11:00 AM | Marketing sync             |                               |
+| Wed Jan 22 | 9:00 AM–10:00 AM | Team standup               | Weekly recurring              |
+| Thu Jan 23 | 1:00 PM–2:00 PM  | Client call — Apex Corp    |                               |
+| Fri Jan 24 | 11:00 AM–12:00 PM | All-hands meeting          | Company-wide                  |
+
+### Week of January 27–February 2, 2025
+
+| Date       | Time          | Event                          | Notes                        |
+|------------|---------------|--------------------------------|------------------------------|
+| Mon Jan 27 | 9:00 AM–10:00 AM | Team standup               | Weekly recurring              |
+| Tue Jan 28 | —             | (no events)                    |                               |
+| Wed Jan 29 | 9:00 AM–10:00 AM | Team standup               | Weekly recurring              |
+| Thu Jan 30 | 3:00 PM–4:00 PM  | Quarterly review prep      |                               |
+| Fri Jan 31 | 10:00 AM–11:30 AM | Quarterly business review  | Presentation required         |
+
+### Week of February 3–9, 2025
+
+| Date       | Time          | Event                          | Notes                        |
+|------------|---------------|--------------------------------|------------------------------|
+| Mon Feb 3  | 8:00 AM–9:00 AM  | Budget review meeting      | With finance team             |
+| Mon Feb 3  | 9:00 AM–10:00 AM | Team standup               | Weekly recurring              |
+| Tue Feb 4  | —             | (no events)                    |                               |
+| Wed Feb 5  | 9:00 AM–10:00 AM | Team standup               | Weekly recurring              |
+
+---
+
+## Email
+
+Atlas can draft, send, and check emails on behalf of the user. Emails are sent from the user's address (dana.fischer@meridian.com).
+
+---
+
+## Contacts
+
+| Name            | Email                        | Phone          | Relationship       |
+|-----------------|------------------------------|----------------|---------------------|
+| Alex Reed       | alex.reed@meridian.com       | 310-555-0142   | Colleague (same team)|
+| Maria Torres    | maria.torres@meridian.com    | 310-555-0198   | Manager              |
+| James Fischer   | james.fischer@gmail.com      | 310-555-0233   | Spouse               |
+| Priya Kapoor    | priya.kapoor@meridian.com    | 310-555-0271   | Colleague (marketing)|
+| Noah Kim        | noah.kim@apexcorp.com        | 212-555-0315   | Client contact       |
+| Samantha Lee    | samantha.lee@meridian.com    | 310-555-0389   | HR representative    |
+
+---
+
+## Reminders
+
+Atlas can set date-and-time reminders that are delivered as push notifications to the user's phone. Reminders require a date, time, and message.
+
+---
+
+## Policies & Limitations
+- Atlas cannot make purchases over $1,000 without verbal confirmation and a confirmation code sent via SMS.
+- Flight bookings are held for 24 hours before payment is processed.
+- Calendar events can only be modified for the user's own calendar (no shared calendar editing).
+- Emails longer than 500 words require the user's approval before sending.
+- Atlas does not store credit card information between sessions.
