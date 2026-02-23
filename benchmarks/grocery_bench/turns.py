@@ -38,7 +38,7 @@ turns = [
                 "8-1-8, 9-4-0, 3-6-1-7. Is all that correct?",
  'required_function_call': None,
  'function_call_response': None,
- 'categories': ['basic_qa', 'numerical_reasoning'],
+ 'categories': ['basic_qa'],
  'audio_file': 'audio/turn_001.wav'},
 
 # Turn 2 — First item: flour (homophone trap: flour vs flower)
@@ -61,7 +61,7 @@ turns = [
                 "ninety-eight for the flour.",
  'required_function_call': None,
  'function_call_response': None,
- 'categories': ['long_range_memory', 'numerical_reasoning'],
+ 'categories': ['long_range_memory'],
  'audio_file': 'audio/turn_003.wav'},
 
 # Turn 4 — Mid-sentence self-correction: rolls → loaf
@@ -97,7 +97,7 @@ turns = [
                 "for the eggs.",
  'required_function_call': None,
  'function_call_response': None,
- 'categories': ['long_range_memory', 'numerical_reasoning'],
+ 'categories': ['long_range_memory'],
  'audio_file': 'audio/turn_006.wav'},
 
 # Turn 7 — Straightforward item lookup: gray sea salt

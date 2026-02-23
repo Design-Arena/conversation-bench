@@ -28,7 +28,7 @@ turns = [
                 "eighty guests. Do you have a date in mind? That will help "
                 "me check venue availability for you.",
  'required_function_call': None,
- 'categories': ['basic_qa', 'numerical_reasoning'],
+ 'categories': ['basic_qa'],
  'audio_file': 'audio/turn_000.wav'},
 
 # Turn 1 — Tool call: search venues for date + guest count
@@ -75,7 +75,7 @@ turns = [
                 "would save you $4,000 over the ballroom. Would you like "
                 "more details on either?",
  'required_function_call': None,
- 'categories': ['basic_qa', 'numerical_reasoning'],
+ 'categories': ['basic_qa'],
  'audio_file': 'audio/turn_002.wav'},
 
 # Turn 3 — Vague pronoun resolution: "the second one, the outdoor one"
@@ -100,7 +100,7 @@ turns = [
                 "five-one-two, eight-four-seven, three-one-six-zero. Is that "
                 "correct?",
  'required_function_call': None,
- 'categories': ['basic_qa', 'numerical_reasoning'],
+ 'categories': ['basic_qa'],
  'audio_file': 'audio/turn_004.wav'},
 
 # Turn 5 — KB question: catering package options and pricing
@@ -116,7 +116,7 @@ turns = [
                 "station, and a dedicated event coordinator included. Would "
                 "you like more details on any of them?",
  'required_function_call': None,
- 'categories': ['basic_qa', 'numerical_reasoning'],
+ 'categories': ['basic_qa'],
  'audio_file': 'audio/turn_005.wav'},
 
 # Turn 6 — Mid-sentence self-correction (Platinum → Gold) + get quote
@@ -398,7 +398,7 @@ turns = [
                                      'field': 'phone',
                                      'new_value': '512-849-3016'}},
  'function_call_response': {'status': 'success'},
- 'categories': ['tool_use', 'long_range_memory', 'numerical_reasoning'],
+ 'categories': ['tool_use', 'long_range_memory'],
  'audio_file': 'audio/turn_022.wav'},
 
 # Turn 23 — Retroactive date change: search availability for new date

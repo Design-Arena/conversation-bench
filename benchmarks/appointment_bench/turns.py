@@ -88,7 +88,7 @@ turns = [
                 "consultation. Both on Monday, January 13th. I'll just "
                 "need phone numbers for each to book those.",
  'required_function_call': None,
- 'categories': ['numerical_reasoning', 'long_range_memory'],
+ 'categories': ['long_range_memory'],
  'audio_file': 'audio/turn_004.wav'},
 
 # Turn 5 — P/B audio confusion: Perry vs Barry disambiguation
@@ -109,7 +109,7 @@ turns = [
                 "she'd be done by 4:15 PM — plenty of time to leave by 5:00. "
                 "Our last appointment slot is 4:15 anyway.",
  'required_function_call': None,
- 'categories': ['numerical_reasoning'],
+ 'categories': ['basic_qa'],
  'audio_file': 'audio/turn_006.wav'},
 
 # ============================================================================
@@ -302,7 +302,7 @@ turns = [
                 "415-960-1614 and Danielle's has 415-916-1640. Would you "
                 "like to change anything?",
  'required_function_call': None,
- 'categories': ['long_range_memory', 'numerical_reasoning'],
+ 'categories': ['long_range_memory'],
  'audio_file': 'audio/turn_020.wav'},
 
 # ============================================================================
