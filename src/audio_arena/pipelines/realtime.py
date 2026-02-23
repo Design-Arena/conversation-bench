@@ -679,7 +679,7 @@ class RealtimePipeline(BasePipeline):
                 model=model,
                 system_instruction=system_instruction,
                 tools=tools,
-                inference_on_context_initialization=True,
+                inference_on_context_initialization=not self._rehydration_turns,
                 on_reconnecting=self._on_gemini_reconnecting,
                 on_reconnected=self._on_gemini_reconnected,
             )
