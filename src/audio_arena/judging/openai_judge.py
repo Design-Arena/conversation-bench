@@ -27,7 +27,7 @@ from .llm_judge import (
 
 
 OPENAI_JUDGE_VERSION = "openai-v1-state-absorbs-tool-penalty"
-OPENAI_JUDGE_MODEL = "o3"
+OPENAI_JUDGE_MODEL = "gpt-5.2"
 
 
 async def judge_with_openai(
