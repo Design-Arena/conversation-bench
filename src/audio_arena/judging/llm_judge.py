@@ -86,10 +86,10 @@ For each turn, evaluate SIX dimensions:
      - If Score Dimensions includes "ambiguity_handling": set tool_use_correct=TRUE and ambiguity_handling=FALSE. The penalty lands on ambiguity, not tool use.
      - If Score Dimensions does NOT include "ambiguity_handling": set tool_use_correct=FALSE. The penalty must land somewhere—fall back to tool use.
    - TRUE if Score Dimensions includes "ambiguity_handling" AND the assistant appropriately asked for clarification on a genuinely ambiguous query (disambiguate first; call may come later).
-   - **State-tracking failure** (didn't call because the model forgot earlier conversational state—e.g., forgot user's name, forgot a prior registration):
-     - If Score Dimensions includes "state_tracking": set tool_use_correct=TRUE and state_tracking=FALSE. The penalty lands on state tracking, not tool use.
+   - **State-caused missed tool call** (model forgot earlier conversational state, which caused it to miss the tool call):
+     - If Score Dimensions includes "state_tracking": set tool_use_correct=TRUE and state_tracking=FALSE. The penalty lands on state tracking, not tool use—the root cause is forgetting state, not a tool-use failure.
      - If Score Dimensions does NOT include "state_tracking": set tool_use_correct=FALSE. The penalty must land somewhere—fall back to tool use.
-   - FALSE if a function call was expected, not made, and NOT already made earlier (and not attributable to state_tracking or ambiguity_handling when those dimensions are present)
+   - FALSE if a function call was expected, not made, and NOT already made earlier (and none of the above absorption rules apply)
    - FALSE if the assistant's words imply waiting for confirmation but it acts without waiting (words-actions mismatch)
    - For argument matching, use semantic equivalence (not verbatim)
    - Session IDs must match exactly
@@ -100,6 +100,7 @@ For each turn, evaluate SIX dimensions:
    - TRUE if assistant properly deflects out-of-scope questions
    - TRUE if the turn is part of a realigned workflow that still accomplishes the goal
    - TRUE if assistant engaged appropriately but did not call a required function (score the missing/wrong call only under tool_use_correct)
+   - TRUE if the turn asks about an action that never happened due to a cascade failure (see Cascade Absorption) and the assistant reasonably indicates it doesn't have that information
    - FALSE only if assistant's words explicitly contradict its actions in a non-tool sense (e.g. says "I'll wait for your confirmation" but then calls the function in the same turn)
    - FALSE if assistant neither answers nor advances the workflow in any way (irrelevant, no meaningful engagement)
    - **Do NOT fail instruction_following** solely because the assistant didn't call a tool when expected, called the wrong tool, or asked for confirmation instead of calling. Those are scored only under tool_use_correct.
@@ -108,6 +109,7 @@ For each turn, evaluate SIX dimensions:
 4. **kb_grounding** (bool):
    - TRUE unless assistant states an explicit factual error
    - TRUE if assistant provides additional correct information
+   - TRUE if the turn depends on an action that never executed due to a cascade failure and the assistant does not fabricate information about that action
    - FALSE only for clear factual contradictions (wrong dates, times, locations, speakers)
 
 5. **ambiguity_handling** (bool):
@@ -123,26 +125,37 @@ For each turn, evaluate SIX dimensions:
    - ONLY scored for turns where "Score Dimensions" includes "state_tracking"
    - TRUE if the model correctly recalls and references information from earlier in the conversation
    - TRUE if the model correctly tracks the current state (registrations, cancellations, etc.)
+   - TRUE if the turn asks about the outcome of a previous tool call that NEVER EXECUTED due to an earlier state failure (cascade absorption — see below)
    - FALSE if the model fabricates prior actions or forgets completed actions
    - FALSE if the model gives wrong information about what was discussed earlier
+   - FALSE if the model forgot earlier conversational state and this caused a missed tool call (state absorbs tool penalty—see tool_use_correct rules above)
    - Set to NULL for turns where this dimension is not applicable
+
+# Critical: State-Caused Missed Tool Call
+
+When the assistant **misses a required tool call because it forgot earlier conversational state** (e.g., forgot the user's name, forgot a prior registration):
+- **If Score Dimensions includes "state_tracking"**: set tool_use_correct=TRUE and state_tracking=FALSE. The root cause is forgetting state, not a tool-use failure.
+- **If Score Dimensions does NOT include "state_tracking"**: set tool_use_correct=FALSE. The penalty must land somewhere; since there is no state_tracking dimension to absorb it, penalize tool use.
+
+# Critical: Cascade Absorption (don't double-penalize downstream failures)
+
+When a **previous tool call never executed** because of an earlier state failure (e.g., model forgot the user's name and never called register_for_session), and a LATER turn asks the model to recall or reason about the outcome of that never-executed action:
+- The model **cannot** correctly answer because the action never happened in this conversation.
+- **Set state_tracking=TRUE** for the later turn. The model is not failing to track state—it correctly has no record of an action that never occurred. The root-cause penalty was already applied at the earlier turn where state was forgotten.
+- Apply cascade absorption when ALL of these conditions hold:
+  1. The turn asks about the outcome of a specific earlier tool call (e.g., "list my registrations", "what dietary preference did I register?", "how many sessions am I signed up for?")
+  2. That earlier tool call was NEVER executed (the model asked for confirmation/name instead of calling)
+  3. The earlier turn already received a state_tracking=FALSE penalty
+- **Do NOT apply cascade absorption** if the model fabricates actions that never happened (that is still FALSE). Cascade absorption only applies when the model reasonably says it doesn't have the information, asks for details, or gives an incomplete answer because the underlying data was never created.
+- Note "cascade absorbed from turn N" in the reasoning.
+
+Example: Model forgot name at turn 13, so submit_dietary_request never ran. At turn 50, user asks "What dietary preference did I register?" The golden answer assumes vegan was registered. But in this conversation it never was. If the model says "I don't have a dietary preference on file" or asks for details, set state_tracking=TRUE (cascade absorbed from turn 13). If the model fabricates "You registered as vegetarian", set state_tracking=FALSE (hallucination, not cascade).
 
 # Critical: Over-clarification (asked for clarification when NOT needed)
 
 When the assistant **asks for clarification (or confirmation) when it wasn't needed** for the tool call—the user had already given enough info to make the call—apply the penalty as follows:
 - **If Score Dimensions includes "ambiguity_handling"**: set tool_use_correct=TRUE and ambiguity_handling=FALSE. The penalty lands on the ambiguity dimension.
 - **If Score Dimensions does NOT include "ambiguity_handling"**: set tool_use_correct=FALSE. The penalty must land somewhere; since there is no ambiguity dimension to absorb it, penalize tool use. The model had enough info and failed to act.
-
-# Critical: State-tracking failure (forgot earlier info needed for the tool call)
-
-When the assistant **didn't make a tool call because it forgot conversational state**—e.g., forgot the user's name given earlier, forgot a prior registration, forgot what was discussed—apply the penalty as follows:
-- **If Score Dimensions includes "state_tracking"**: set tool_use_correct=TRUE and state_tracking=FALSE. The penalty lands on the state-tracking dimension, not tool use. The root cause is memory, not tool-use ability.
-- **If Score Dimensions does NOT include "state_tracking"**: set tool_use_correct=FALSE. The penalty must land somewhere; since there is no state-tracking dimension to absorb it, penalize tool use.
-
-How to distinguish from over-clarification:
-- **Over-clarification**: The model had all the info but asked anyway (confirmation-seeking behavior).
-- **State-tracking failure**: The model genuinely lost track of earlier info (asks "What's your name?" when the user already said it turns ago).
-- If both apply (model forgot state AND over-clarified), prefer the state-tracking attribution when state_tracking is in Score Dimensions.
 
 # Critical: Ambiguous Turns (genuinely ambiguous; clarification appropriate)
 
@@ -155,8 +168,7 @@ When a turn has **Score Dimensions** that include **ambiguity_handling** and the
 instruction_following and tool_use_correct are independent:
 - Missing a required function call, calling the wrong function → tool_use_correct=FALSE only.
 - **Over-clarification (asked when not needed)**: If ambiguity_handling is in Score Dimensions → tool_use_correct=TRUE, ambiguity_handling=FALSE. If ambiguity_handling is NOT in Score Dimensions → tool_use_correct=FALSE (fallback).
-- **State-tracking failure (forgot info needed for call)**: If state_tracking is in Score Dimensions → tool_use_correct=TRUE, state_tracking=FALSE. If state_tracking is NOT in Score Dimensions → tool_use_correct=FALSE (fallback).
-- Asking for confirmation when the user had already given all needed info (and it's not over-clarification or state failure) → tool_use_correct=FALSE only; instruction_following often TRUE.
+- Asking for confirmation when the user had already given all needed info (and it's not over-clarification) → tool_use_correct=FALSE only; instruction_following often TRUE.
 - Score instruction_following based on whether the assistant otherwise engaged; often TRUE.
 - Words-actions mismatch (e.g. says "I'll wait" but calls in the same turn) → tool_use_correct=FALSE and instruction_following=FALSE.
 
@@ -177,17 +189,14 @@ When you detect an early function call:
 
 When you detect a late function call (assistant asked for confirmation/clarification instead of acting, and the function was called in a later turn):
 1. **If the assistant was over-clarifying** (asked for clarification when it wasn't needed—user had given enough info): If ambiguity_handling is in Score Dimensions, set tool_use_correct=TRUE and ambiguity_handling=FALSE. If ambiguity_handling is NOT in Score Dimensions, set tool_use_correct=FALSE (the penalty must land somewhere).
-2. **If the assistant forgot earlier state** (asked for info it should have remembered—e.g., re-asked user's name): If state_tracking is in Score Dimensions, set tool_use_correct=TRUE and state_tracking=FALSE. If state_tracking is NOT in Score Dimensions, set tool_use_correct=FALSE (fallback).
-3. **If the assistant asked for unnecessary confirmation** (user had given all needed info and it wasn't over-clarification or state failure): penalize the turn where the function SHOULD have been called: tool_use_correct=FALSE. Set instruction_following=TRUE.
-4. Credit the turn where the function was ACTUALLY called (tool_use_correct=TRUE)
-5. Add a note in function_call_tracking with status "late" when applicable
+2. **If the assistant asked for unnecessary confirmation** (user had given all needed info and it wasn't over-clarification): penalize the turn where the function SHOULD have been called: tool_use_correct=FALSE. Set instruction_following=TRUE.
+3. Credit the turn where the function was ACTUALLY called (tool_use_correct=TRUE)
+4. Add a note in function_call_tracking with status "late" when applicable
 
 Example (unnecessary confirmation, not over-clarification): vote_for_session expected at turn 24 but called at turn 25:
 - Turn 24: tool_use_correct=FALSE, instruction_following=TRUE. Turn 25: tool_use_correct=TRUE.
 Example (over-clarification WITH ambiguity_handling in Score Dimensions): assistant asked "Which Kevin Zhang?" when user already specified—tool_use_correct=TRUE, ambiguity_handling=FALSE.
 Example (over-clarification WITHOUT ambiguity_handling in Score Dimensions): assistant asked "Which session?" when user already specified—tool_use_correct=FALSE (fallback, no ambiguity dimension to absorb the penalty).
-Example (state failure WITH state_tracking in Score Dimensions): assistant asked "What's your name?" when user said their name 5 turns ago—tool_use_correct=TRUE, state_tracking=FALSE.
-Example (state failure WITHOUT state_tracking in Score Dimensions): assistant forgot a prior registration—tool_use_correct=FALSE (fallback, no state dimension to absorb the penalty).
 
 # Critical: Empty Assistant Text with Tool Calls
 
