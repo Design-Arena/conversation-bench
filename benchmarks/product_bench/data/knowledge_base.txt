@@ -1,0 +1,102 @@
+
+# TechMart Electronics
+
+## Overview
+TechMart Electronics is an online electronics retailer specializing in laptops, desktops, and accessories. We offer new, certified refurbished, and open-box products with full manufacturer warranties.
+
+## Contact
+- **Phone:** (888) 555-0312
+- **Email:** orders@techmartelectronics.com
+- **Website:** www.techmartelectronics.com
+- **Customer Service Hours:** Monday–Friday 8:00 AM – 9:00 PM ET, Saturday–Sunday 10:00 AM – 6:00 PM ET
+
+## Laptop Catalog
+
+### ProBook X1490
+- **Price:** $1,299 (new) / $1,099 (open-box)
+- **Display:** 15.6" Full HD IPS, 300 nits
+- **Processor:** Intel Core i7-13700H (14 cores)
+- **RAM:** 16GB DDR5-4800
+- **Storage:** 512GB NVMe SSD
+- **GPU:** Intel Iris Xe integrated graphics
+- **Battery:** Up to 10 hours
+- **Weight:** 4.2 lbs
+- **Color:** Silver
+- **Ports:** 2x USB-C (Thunderbolt 4), 2x USB-A, HDMI 2.1, SD card reader
+- **Best for:** General productivity, programming, light creative work
+
+### ProBook X1940
+- **Price:** $1,499 (new) / $1,199 (open-box)
+- **Display:** 15.6" Full HD IPS, 300 nits
+- **Processor:** Intel Core i9-13900H (14 cores)
+- **RAM:** 32GB DDR5-4800
+- **Storage:** 1TB NVMe SSD
+- **GPU:** NVIDIA GeForce RTX 4050 (6GB)
+- **Battery:** Up to 8 hours
+- **Weight:** 4.8 lbs
+- **Color:** Space Gray
+- **Ports:** 2x USB-C (Thunderbolt 4), 2x USB-A, HDMI 2.1, SD card reader
+- **Best for:** Professional creative work, video editing, 3D rendering, gaming
+
+### UltraSlim S15
+- **Price:** $999 (new only)
+- **Display:** 15.6" Full HD IPS, 250 nits
+- **Processor:** AMD Ryzen 7 7735U (8 cores)
+- **RAM:** 16GB DDR5-5600
+- **Storage:** 256GB NVMe SSD
+- **GPU:** AMD Radeon 680M integrated graphics
+- **Battery:** Up to 12 hours
+- **Weight:** 3.5 lbs
+- **Color:** Midnight Blue
+- **Ports:** 2x USB-C, 1x USB-A, HDMI 2.0, microSD
+- **Best for:** Students, everyday use, portability-focused
+
+### UltraSlim S15 Pro
+- **Price:** $1,199 (new only)
+- **Display:** 15.6" QHD IPS (2560x1440), 350 nits
+- **Processor:** AMD Ryzen 9 7940HS (8 cores)
+- **RAM:** 16GB DDR5-5600
+- **Storage:** 512GB NVMe SSD
+- **GPU:** AMD Radeon RX 7600S (4GB dedicated)
+- **Battery:** Up to 9 hours
+- **Weight:** 3.8 lbs
+- **Color:** Midnight Blue
+- **Ports:** 2x USB-C, 2x USB-A, HDMI 2.1, SD card reader
+- **Best for:** Creative professionals, photo/video editing, portable power
+
+## Student Discount
+- **Discount:** 10% off any new laptop with valid .edu email address
+- **Verification:** Student provides .edu email at checkout; verification email sent
+- **Stackable:** Student discount does NOT stack with open-box pricing
+- **Limit:** One discounted laptop per student per academic year
+
+## Warranty Options
+- **Standard Warranty:** 1 year — included with all products (new and open-box)
+- **Extended Warranty (3-year):** $149 — adds 2 years of coverage beyond standard
+- **Accidental Damage Protection:** $79/year — covers drops, spills, and cracked screens
+- **Open-box products** receive the full standard 1-year warranty
+
+## Return Policy
+- **New products:** 30-day return window, full refund in original packaging
+- **Open-box products:** 15-day return window, full refund
+- **Restocking fee:** 10% restocking fee on returns made after 14 days (new products only)
+- **Defective products:** No restocking fee; free return shipping
+
+## Shipping Options
+- **Standard shipping:** Free, 5–7 business days
+- **Express shipping:** $19.99, 2–3 business days
+- **Next-day shipping:** $34.99, next business day (order by 2:00 PM ET)
+- **In-store pickup:** Free, available at our warehouse in Edison, NJ
+
+## Payment Options
+- Credit/debit cards (Visa, MasterCard, Amex, Discover)
+- PayPal
+- Financing: 0% APR for 12 months on orders $500+ (through TechMart Credit)
+- Gift cards accepted
+
+## Product Recommendations by Use Case
+- **Coding / Software Development:** ProBook X1490 or X1940 (Intel platform, Thunderbolt ports, 16+ GB RAM)
+- **Graphic Design / Photo Editing:** UltraSlim S15 Pro (QHD display, dedicated GPU) or ProBook X1940 (RTX 4050)
+- **Video Editing / 3D Rendering:** ProBook X1940 (32GB RAM, RTX 4050, 1TB storage)
+- **General Student Use:** UltraSlim S15 (lightweight, long battery, affordable)
+- **Budget-Conscious Power User:** ProBook X1490 open-box (i7 + 512GB at $1,099)
