@@ -718,7 +718,11 @@ class RealtimePipeline(BasePipeline):
         # - OpenAI Realtime and Grok Realtime: need user message + LLMRunFrame
         # - Gemini Live: needs user message with inference_on_context_initialization=True
         # - Ultravox: auto-greets, no trigger needed
-        if self._is_openai_realtime() or self._is_grok_realtime() or self._is_gemini_live():
+        # Skip greeting in rehydration mode — it wastes a model turn and pollutes
+        # session state, causing subsequent short user audio to be ignored.
+        if not self._rehydration_turns and (
+            self._is_openai_realtime() or self._is_grok_realtime() or self._is_gemini_live()
+        ):
             messages.append({"role": "user", "content": "Greet the user briefly."})
 
         self.context = LLMContext(messages, tools=tools)
@@ -1202,49 +1206,62 @@ class RealtimePipeline(BasePipeline):
         if hasattr(self, 'llm_logger') and self.llm_logger is not None and self.output_transport is not None:
             self.llm_logger.set_recording_start_time(self.output_transport._recording_start_time)
 
-        # Trigger initial greeting for models that need explicit ResponseCreateEvent.
-        # - Ultravox: auto-greets when websocket connects (no trigger needed)
-        # - OpenAI/Grok Realtime: need LLMRunFrame to trigger _create_response()
-        # - Gemini Live: auto-greets via inference_on_context_initialization=True (no trigger needed)
-        if self._is_openai_realtime() or self._is_grok_realtime():
-            logger.info("[Pipeline] Triggering initial greeting via LLMRunFrame for OpenAI/Grok Realtime")
-            await self.task.queue_frames([LLMRunFrame()])
+        # In rehydration mode, skip greeting entirely — no user to greet, and the
+        # greeting pollutes session state causing the real user audio to be ignored.
+        # We also add a stabilization delay to let the model fully ingest the
+        # (potentially large) system instruction before audio arrives.
+        if self._rehydration_turns:
+            stabilization_secs = 3.0
+            logger.info(
+                f"[Pipeline] Rehydration mode — skipping greeting, "
+                f"waiting {stabilization_secs}s for model to process context "
+                f"({len(self._rehydration_turns)} golden turns)"
+            )
+            await asyncio.sleep(stabilization_secs)
+        else:
+            # Trigger initial greeting for models that need explicit ResponseCreateEvent.
+            # - Ultravox: auto-greets when websocket connects (no trigger needed)
+            # - OpenAI/Grok Realtime: need LLMRunFrame to trigger _create_response()
+            # - Gemini Live: auto-greets via inference_on_context_initialization=True (no trigger needed)
+            if self._is_openai_realtime() or self._is_grok_realtime():
+                logger.info("[Pipeline] Triggering initial greeting via LLMRunFrame for OpenAI/Grok Realtime")
+                await self.task.queue_frames([LLMRunFrame()])
 
-        # Wait for initial greeting to complete before playing user audio
-        # Some models (like Ultravox) produce an automatic greeting when the session starts.
-        # We need to wait for this greeting to finish (BotStoppedSpeakingFrame) before
-        # sending user audio, otherwise the greeting gets interrupted.
-        #
-        # Two-phase wait:
-        # 1. Wait up to 8s for bot to START speaking (BotStartedSpeakingFrame)
-        # 2. If bot started, wait up to 30s for bot to STOP speaking (BotStoppedSpeakingFrame)
-        # 3. If no bot speech within 8s, proceed immediately (model doesn't greet)
-        greeting_start_timeout = 8.0  # seconds to wait for bot to start speaking
-        greeting_complete_timeout = 30.0  # seconds to wait for bot to stop speaking
+            # Wait for initial greeting to complete before playing user audio
+            # Some models (like Ultravox) produce an automatic greeting when the session starts.
+            # We need to wait for this greeting to finish (BotStoppedSpeakingFrame) before
+            # sending user audio, otherwise the greeting gets interrupted.
+            #
+            # Two-phase wait:
+            # 1. Wait up to 8s for bot to START speaking (BotStartedSpeakingFrame)
+            # 2. If bot started, wait up to 30s for bot to STOP speaking (BotStoppedSpeakingFrame)
+            # 3. If no bot speech within 8s, proceed immediately (model doesn't greet)
+            greeting_start_timeout = 8.0  # seconds to wait for bot to start speaking
+            greeting_complete_timeout = 30.0  # seconds to wait for bot to stop speaking
 
-        logger.info(f"[Pipeline] Waiting up to {greeting_start_timeout}s for initial greeting to start...")
-        greeting_occurred = False
-        try:
-            await asyncio.wait_for(self._greeting_started.wait(), timeout=greeting_start_timeout)
-            logger.info(f"[Pipeline] Bot started greeting, waiting up to {greeting_complete_timeout}s for completion...")
+            logger.info(f"[Pipeline] Waiting up to {greeting_start_timeout}s for initial greeting to start...")
+            greeting_occurred = False
             try:
-                await asyncio.wait_for(self._greeting_done.wait(), timeout=greeting_complete_timeout)
-                logger.info("[Pipeline] Initial greeting complete, proceeding with user audio")
-                greeting_occurred = True
+                await asyncio.wait_for(self._greeting_started.wait(), timeout=greeting_start_timeout)
+                logger.info(f"[Pipeline] Bot started greeting, waiting up to {greeting_complete_timeout}s for completion...")
+                try:
+                    await asyncio.wait_for(self._greeting_done.wait(), timeout=greeting_complete_timeout)
+                    logger.info("[Pipeline] Initial greeting complete, proceeding with user audio")
+                    greeting_occurred = True
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"[TURN_FAILURE] Greeting did not complete within {greeting_complete_timeout}s timeout. "
+                        "Bot started speaking but never stopped. This may indicate a hung connection or model issue."
+                    )
+                    greeting_occurred = True
             except asyncio.TimeoutError:
-                logger.error(
-                    f"[TURN_FAILURE] Greeting did not complete within {greeting_complete_timeout}s timeout. "
-                    "Bot started speaking but never stopped. This may indicate a hung connection or model issue."
-                )
-                greeting_occurred = True
-        except asyncio.TimeoutError:
-            logger.info("[Pipeline] No greeting started within timeout, model doesn't greet - proceeding with user audio")
+                logger.info("[Pipeline] No greeting started within timeout, model doesn't greet - proceeding with user audio")
 
-        # If a greeting occurred, clear any pending state in TurnGate
-        # The greeting transcript should not be recorded as turn 0's response
-        if greeting_occurred:
-            logger.info("[Pipeline] Clearing TurnGate state after greeting")
-            self.turn_gate.clear_pending()
+            # If a greeting occurred, clear any pending state in TurnGate
+            # The greeting transcript should not be recorded as turn 0's response
+            if greeting_occurred:
+                logger.info("[Pipeline] Clearing TurnGate state after greeting")
+                self.turn_gate.clear_pending()
 
         # Queue first turn audio
         turn = self._get_current_turn()

@@ -1445,15 +1445,9 @@ class NovaSonicPipeline:
 
         self.llm.register_function(None, function_catchall)
 
-        # Create context with greeting trigger message
-        # Nova 2 Sonic needs the context to end with a user message to trigger a response.
-        # We add a simple greeting trigger that will cause the bot to greet when LLMRunFrame
-        # is queued. This message will be transcribed and added to conversation history.
-        greeting_trigger = "Hello!"
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": greeting_trigger},
-        ]
+        messages = [{"role": "system", "content": system_instruction}]
+        if not self._rehydration_turns:
+            messages.append({"role": "user", "content": "Hello!"})
         self.context = LLMContext(messages, tools=tools)
         self.context_aggregator = LLMContextAggregatorPair(self.context)
 
@@ -1883,51 +1877,47 @@ class NovaSonicPipeline:
         self.paced_input.set_recording_baseline()
         logger.info("[NovaSonic] Recording baselines set")
 
-        # Enable tagging for the initial greeting audio.
-        # Normally tags are triggered by VADUserStoppedSpeakingFrame, but the
-        # greeting happens before any user speech, so we enable it explicitly.
-        self.output_transport.enable_greeting_tag()
+        if self._rehydration_turns:
+            stabilization_secs = 3.0
+            logger.info(
+                f"[NovaSonic] Rehydration mode — skipping greeting, "
+                f"waiting {stabilization_secs}s for model to process context "
+                f"({len(self._rehydration_turns)} golden turns)"
+            )
+            await self.task.queue_frames([LLMRunFrame()])
+            await asyncio.sleep(stabilization_secs)
+            self.paced_input.signal_ready()
+        else:
+            self.output_transport.enable_greeting_tag()
+            logger.info("Queuing LLMRunFrame to trigger initial greeting...")
+            await self.task.queue_frames([LLMRunFrame()])
+            await asyncio.sleep(1.0)
+            logger.info("Signaling LLM ready for audio...")
+            self.paced_input.signal_ready()
 
-        # Queue LLMRunFrame to trigger initial greeting
-        # The context has a "Hello!" user message that triggers Nova Sonic to greet
-        logger.info("Queuing LLMRunFrame to trigger initial greeting...")
-        await self.task.queue_frames([LLMRunFrame()])
-
-        # Wait for connection to establish
-        await asyncio.sleep(1.0)
-
-        # Signal LLM ready to receive audio
-        logger.info("Signaling LLM ready for audio...")
-        self.paced_input.signal_ready()
-
-        # Wait for initial greeting to complete before playing user audio
-        # This ensures the greeting isn't interrupted by user audio
-        greeting_start_timeout = 8.0  # seconds to wait for bot to start speaking
-        greeting_complete_timeout = 30.0  # seconds to wait for bot to stop speaking
-
-        logger.info(f"[NovaSonic] Waiting up to {greeting_start_timeout}s for initial greeting to start...")
-        greeting_occurred = False
-        try:
-            await asyncio.wait_for(self._greeting_started.wait(), timeout=greeting_start_timeout)
-            logger.info(f"[NovaSonic] Bot started greeting, waiting up to {greeting_complete_timeout}s for completion...")
+            greeting_start_timeout = 8.0
+            greeting_complete_timeout = 30.0
+            logger.info(f"[NovaSonic] Waiting up to {greeting_start_timeout}s for initial greeting to start...")
+            greeting_occurred = False
             try:
-                await asyncio.wait_for(self._greeting_done.wait(), timeout=greeting_complete_timeout)
-                logger.info("[NovaSonic] Initial greeting complete, proceeding with user audio")
-                greeting_occurred = True
+                await asyncio.wait_for(self._greeting_started.wait(), timeout=greeting_start_timeout)
+                logger.info(f"[NovaSonic] Bot started greeting, waiting up to {greeting_complete_timeout}s for completion...")
+                try:
+                    await asyncio.wait_for(self._greeting_done.wait(), timeout=greeting_complete_timeout)
+                    logger.info("[NovaSonic] Initial greeting complete, proceeding with user audio")
+                    greeting_occurred = True
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"[NovaSonic] Greeting did not complete within {greeting_complete_timeout}s timeout. "
+                        "Bot started speaking but never stopped."
+                    )
+                    greeting_occurred = True
             except asyncio.TimeoutError:
-                logger.error(
-                    f"[NovaSonic] Greeting did not complete within {greeting_complete_timeout}s timeout. "
-                    "Bot started speaking but never stopped."
-                )
-                greeting_occurred = True
-        except asyncio.TimeoutError:
-            logger.warning("[NovaSonic] No greeting started within timeout, model doesn't greet - proceeding with user audio")
+                logger.warning("[NovaSonic] No greeting started within timeout, model doesn't greet - proceeding with user audio")
 
-        # If a greeting occurred, clear the turn gate state
-        # The greeting should not be recorded as part of turn 0's response
-        if greeting_occurred:
-            logger.info("[NovaSonic] Clearing TurnGate state after greeting")
-            self.turn_gate.clear_pending()
+            if greeting_occurred:
+                logger.info("[NovaSonic] Clearing TurnGate state after greeting")
+                self.turn_gate.clear_pending()
 
         # Queue user's question as AUDIO
         turn = self._get_current_turn()
