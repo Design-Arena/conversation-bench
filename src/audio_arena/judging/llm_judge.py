@@ -178,6 +178,8 @@ FAIL instruction_following only when the assistant's text implies one behavior a
 - Says "I'll wait for confirmation" but calls the function immediately in the same turn
 - Says "Does that work?" in the same turn where it then confirms completion (without waiting). Do NOT fail instruction_following for a turn that only asked for confirmation and did not call; that turn gets tool_use_correct=FALSE only.
 
+**NOT a mismatch**: The assistant calls the correct function with correct arguments, gets an error back (e.g. SLOT_TAKEN), and reports that error to the user. The speech reflects the tool result, not a contradiction. Score tool_use_correct=TRUE, instruction_following=TRUE.
+
 # Critical: Handling Early Function Calls
 
 When you detect an early function call:
