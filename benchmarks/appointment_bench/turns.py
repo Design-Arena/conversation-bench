@@ -109,7 +109,7 @@ turns = [
                 "she'd be done by 4:15 PM — plenty of time to leave by 5:00. "
                 "Our last appointment slot is 4:15 anyway.",
  'required_function_call': None,
- 'categories': ['basic_qa'],
+ 'categories': ['basic_qa', 'numerical_reasoning'],
  'audio_file': 'audio/turn_006.wav'},
 
 # ============================================================================
@@ -263,12 +263,13 @@ turns = [
  'categories': ['tool_use', 'long_range_memory'],
  'audio_file': 'audio/turn_016.wav'},
 
-# Turn 17 — Minimal one-word confirmation (short audio)
-{'input': "Yep.",
- 'golden_text': "Great. Is there anything else you'd like to change, or are "
-                "we good to go?",
+# Turn 17 — Minimal acknowledgment + pivot to next topic (short audio)
+{'input': "Perfect. OK so are we all set then?",
+ 'golden_text': "Yes — you have a cleaning at 10:30 AM with Dr. Perry and "
+                "Danielle has an orthodontic consultation at 3:45 PM with "
+                "Dr. Barry, both on Monday, January 13th. Anything else?",
  'required_function_call': None,
- 'categories': ['basic_qa'],
+ 'categories': ['basic_qa', 'long_range_memory'],
  'audio_file': 'audio/turn_017.wav'},
 
 # ============================================================================
@@ -354,7 +355,7 @@ turns = [
                 "ahead of time at bayshorefamilydental.com. Anything else "
                 "I can help with?",
  'required_function_call': None,
- 'categories': ['basic_qa'],
+ 'categories': ['basic_qa', 'long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_023.wav'},
 
 # Turn 24 — Closing: user confirms done, end session

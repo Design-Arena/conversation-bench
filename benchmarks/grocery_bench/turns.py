@@ -61,7 +61,7 @@ turns = [
                 "ninety-eight for the flour.",
  'required_function_call': None,
  'function_call_response': None,
- 'categories': ['long_range_memory'],
+ 'categories': ['long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_003.wav'},
 
 # Turn 4 — Mid-sentence self-correction: rolls → loaf
@@ -97,7 +97,7 @@ turns = [
                 "for the eggs.",
  'required_function_call': None,
  'function_call_response': None,
- 'categories': ['long_range_memory'],
+ 'categories': ['long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_006.wav'},
 
 # Turn 7 — Straightforward item lookup: gray sea salt
