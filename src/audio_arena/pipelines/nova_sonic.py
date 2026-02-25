@@ -1293,6 +1293,7 @@ class NovaSonicPipeline:
         service_name=None,
         turn_indices=None,
         rehydration_turns=None,
+        disable_vad: bool = False,
     ) -> None:
         """Run the complete benchmark.
 
@@ -1306,6 +1307,7 @@ class NovaSonicPipeline:
                 When set, the pipeline runs in single-step rehydration mode: the golden
                 history is appended to the system instruction, and only the target turn(s)
                 specified by ``turn_indices`` are executed live.
+            disable_vad: Ignored for Nova Sonic.
         """
         import os
         import soundfile as sf
@@ -1323,6 +1325,7 @@ class NovaSonicPipeline:
         self.model_name = model
         self._turn_indices = turn_indices
         self._rehydration_turns = rehydration_turns
+        self._disable_vad = disable_vad
 
         # Validate AWS credentials
         if not (self._aws_access_key_id and self._aws_secret_access_key):

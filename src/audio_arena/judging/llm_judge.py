@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-LLM-based transcript judge (realignment + over-clarification handling).
+LLM-based transcript judge (mode-aware realignment + over-clarification handling).
 
 Shared evaluation logic for all judge backends (Claude, OpenAI, etc.).
 Contains the system prompt, turn formatting, output writing, and the Claude judge implementation.
 
-Handles turn misalignment:
+For normal runs, the judge can handle turn misalignment:
 - Early function calls: call at turn N instead of expected N+1; later turns not penalized.
 - Late function calls: call at N+1 instead of N; scoring distinguishes over-clarification vs unnecessary confirmation.
 
-Uses a two-phase approach:
-1. Initial pass: Compare each turn against golden expectations
-2. Realignment pass: Detect early/late function calls and adjust scoring
+The judge stays mode-aware:
+1. Normal runs can use a two-phase pass with cross-turn realignment
+2. Rehydrated runs keep scoring turn-local and skip cross-turn credit shifting
 
 Usage via CLI:
     uv run audio-arena judge runs/conversation_bench/20251215T202910_gemini-...
@@ -43,6 +43,7 @@ except ImportError:
 # ============================================================================
 
 JUDGE_VERSION = "claude-agent-sdk-v8-state-absorbs-tool-penalty"
+REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v9-rehydrated-no-realignment-state-absorbs-tool-penalty"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
@@ -269,6 +270,17 @@ Note: Set `ambiguity_handling` and `state_tracking` to NULL for turns where they
 Output ONLY this JSON object, no markdown code blocks, no explanations outside the JSON.
 """
 
+REHYDRATED_JUDGE_MODE_OVERRIDE = """# Rehydrated Run Override
+This run was produced in single-step rehydration mode. Each turn was evaluated in a fresh isolated session with golden prior context.
+
+For this run:
+- Do NOT do any cross-turn realignment.
+- Do NOT shift tool-use credit across turns for early or late function calls.
+- Treat each turn independently.
+- Keep the penalty absorption rules within the current turn only: if the model missed a tool call because it over-clarified or forgot hydrated state, land that penalty on ambiguity_handling or state_tracking when that dimension is available.
+- Set `realignment_notes` to a brief note that cross-turn realignment was disabled for this rehydrated run.
+"""
+
 
 # ============================================================================
 # Data Loading
@@ -287,6 +299,85 @@ def load_transcript(run_dir: Path) -> List[Dict[str, Any]]:
             if line:
                 records.append(json.loads(line))
     return records
+
+
+def load_runtime_metadata(run_dir: Path) -> Dict[str, Any]:
+    """Load runtime.json when present."""
+    runtime_path = run_dir / "runtime.json"
+    if not runtime_path.exists():
+        return {}
+
+    try:
+        return json.loads(runtime_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def uses_cross_turn_realignment(run_dir: Path) -> bool:
+    """Rehydrated runs evaluate each turn independently, so cross-turn credit shifting is disabled."""
+    runtime = load_runtime_metadata(run_dir)
+    return runtime.get("mode") != "rehydrated"
+
+
+def build_judge_system_prompt(cross_turn_realignment: bool) -> str:
+    """Prefix the shared prompt with a mode override when rehydrated runs should stay turn-local."""
+    if cross_turn_realignment:
+        return JUDGE_SYSTEM_PROMPT
+    return f"{REHYDRATED_JUDGE_MODE_OVERRIDE}\n\n{JUDGE_SYSTEM_PROMPT}"
+
+
+def build_judge_user_prompt(
+    formatted_turns: str,
+    turn_count: int,
+    cross_turn_realignment: bool,
+) -> str:
+    """Build the mode-specific user prompt."""
+    if cross_turn_realignment:
+        instructions = f"""Please perform your two-phase evaluation:
+1. First, analyze each turn against its golden expectation
+2. Then, identify any turn misalignments (early/late function calls)
+3. Apply realignment adjustments to avoid double-penalizing
+4. Output the final JSON with judgments for ALL {turn_count} turns
+
+CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries (turns 0-{turn_count - 1}).
+
+Remember:
+- If a function is called early (before expected turn), subsequent turns should not be penalized for the "missing" call
+- If a function is called late, credit the turn that did call it (tool_use_correct=TRUE). For the turn that should have called: if they **over-clarified** and ambiguity_handling is in Score Dimensions → tool_use_correct=TRUE, ambiguity_handling=FALSE; if they **forgot state** and state_tracking is in Score Dimensions → tool_use_correct=TRUE, state_tracking=FALSE; if neither dimension can absorb → tool_use_correct=FALSE; if they asked for unnecessary confirmation → tool_use_correct=FALSE
+- **Penalty absorption rule**: When a tool call is missed due to a more specific root cause, the penalty lands on the specific dimension (ambiguity_handling or state_tracking) if it's in Score Dimensions. If the specific dimension is NOT in Score Dimensions, fall back to tool_use_correct=FALSE. The penalty must always land somewhere.
+- Missing/wrong tool call (not over-clarification or state failure) → tool_use_correct=FALSE only; do not fail instruction_following
+- Words contradict actions (e.g. says "I'll wait" but calls in same turn) → tool_use_correct=FALSE and instruction_following=FALSE
+- Be generous with kb_grounding unless there's a clear factual error
+- Empty assistant_text with a valid tool call is still a valid turn - evaluate the tool call
+"""
+    else:
+        instructions = f"""Please evaluate each turn independently:
+1. Analyze each turn against its golden expectation
+2. Do NOT shift tool-use credit across turns for early or late function calls
+3. Keep the penalty absorption rule within the current turn only
+4. Output the final JSON with judgments for ALL {turn_count} turns
+
+CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries (turns 0-{turn_count - 1}).
+
+Remember:
+- This is a rehydrated run. Each turn stands on its own, so do NOT mark tool_use_correct=TRUE because the expected call happened in another turn
+- Do NOT retroactively credit a turn because a function was called later in a different turn
+- **Penalty absorption rule**: When a tool call is missed due to a more specific root cause within the same turn, the penalty lands on the specific dimension (ambiguity_handling or state_tracking) if it's in Score Dimensions. If the specific dimension is NOT in Score Dimensions, fall back to tool_use_correct=FALSE. The penalty must always land somewhere.
+- Missing/wrong tool call (not over-clarification or state failure) → tool_use_correct=FALSE only; do not fail instruction_following
+- Words contradict actions (e.g. says "I'll wait" but calls in same turn) → tool_use_correct=FALSE and instruction_following=FALSE
+- Be generous with kb_grounding unless there's a clear factual error
+- Empty assistant_text with a valid tool call is still a valid turn - evaluate the tool call
+- Set realignment_notes to "Cross-turn realignment disabled for rehydrated run."
+"""
+
+    return f"{formatted_turns}\n\n{instructions}"
+
+
+def build_judge_summary(turn_count: int, cross_turn_realignment: bool) -> str:
+    """Human-readable summary string for downstream output."""
+    if cross_turn_realignment:
+        return f"Evaluated {turn_count} turns with cross-turn realignment."
+    return f"Evaluated {turn_count} turns without cross-turn realignment."
 
 
 # ============================================================================
@@ -437,7 +528,7 @@ async def judge_with_claude(
     skip_turn_taking: bool = False,
     get_relevant_dimensions_fn=None,
 ) -> Dict[str, Any]:
-    """Main judging function using two-phase realignment approach.
+    """Main judging function using mode-aware scoring.
 
     Args:
         run_dir: Path to the run directory containing transcript.jsonl
@@ -467,8 +558,11 @@ async def judge_with_claude(
 
     model_name = records[0].get("model_name", "unknown")
 
+    cross_turn_realignment = uses_cross_turn_realignment(run_dir)
+
     if debug:
-        print(f"Judging {len(records)} turns with realignment analysis...", file=sys.stderr)
+        mode_label = "with cross-turn realignment" if cross_turn_realignment else "without cross-turn realignment"
+        print(f"Judging {len(records)} turns {mode_label}...", file=sys.stderr)
 
     # Run turn-taking analysis if WAV file exists
     turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None
@@ -498,30 +592,13 @@ async def judge_with_claude(
     # Format turns (with turn-taking data if available)
     formatted_turns = format_turns_for_judge(records, expected_turns, only_turns, turn_taking_data, get_relevant_dimensions_fn)
 
-    # Create prompt
-    prompt = f"""{formatted_turns}
-
-Please perform your two-phase evaluation:
-1. First, analyze each turn against its golden expectation
-2. Then, identify any turn misalignments (early/late function calls)
-3. Apply realignment adjustments to avoid double-penalizing
-4. Output the final JSON with judgments for ALL {len(records)} turns
-
-CRITICAL: Your final_judgments array MUST contain exactly {len(records)} entries (turns 0-{len(records)-1}).
-
-Remember:
-- If a function is called early (before expected turn), subsequent turns should not be penalized for the "missing" call
-- If a function is called late, credit the turn that did call it (tool_use_correct=TRUE). For the turn that should have called: if they **over-clarified** and ambiguity_handling is in Score Dimensions → tool_use_correct=TRUE, ambiguity_handling=FALSE; if they **forgot state** and state_tracking is in Score Dimensions → tool_use_correct=TRUE, state_tracking=FALSE; if neither dimension can absorb → tool_use_correct=FALSE; if they asked for unnecessary confirmation → tool_use_correct=FALSE
-- **Penalty absorption rule**: When a tool call is missed due to a more specific root cause, the penalty lands on the specific dimension (ambiguity_handling or state_tracking) if it's in Score Dimensions. If the specific dimension is NOT in Score Dimensions, fall back to tool_use_correct=FALSE. The penalty must always land somewhere.
-- Missing/wrong tool call (not over-clarification or state failure) → tool_use_correct=FALSE only; do not fail instruction_following
-- Words contradict actions (e.g. says "I'll wait" but calls in same turn) → tool_use_correct=FALSE and instruction_following=FALSE
-- Be generous with kb_grounding unless there's a clear factual error
-- Empty assistant_text with a valid tool call is still a valid turn - evaluate the tool call
-"""
+    prompt = build_judge_user_prompt(formatted_turns, len(records), cross_turn_realignment)
+    system_prompt = build_judge_system_prompt(cross_turn_realignment)
+    judge_version = JUDGE_VERSION if cross_turn_realignment else REHYDRATED_JUDGE_VERSION
 
     # Configure options - use extended thinking for complex reasoning
     options = ClaudeAgentOptions(
-        system_prompt=JUDGE_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         model=JUDGE_MODEL,
         permission_mode="bypassPermissions",
     )
@@ -619,9 +696,11 @@ Remember:
         "judgments": judgments,
         "realignment_notes": realignment_notes,
         "function_tracking": function_tracking,
+        "cross_turn_realignment_applied": cross_turn_realignment,
         "turn_taking_analysis": turn_taking_analysis.to_dict() if turn_taking_analysis else None,
-        "summary": f"Evaluated {len(judgments)} turns with realignment.",
+        "summary": build_judge_summary(len(judgments), cross_turn_realignment),
         "model_name": model_name,
+        "judge_version": judge_version,
     }
 
 
@@ -642,6 +721,7 @@ def write_outputs(
     judge_name: str = "claude",
     judge_version: Optional[str] = None,
     judge_model: Optional[str] = None,
+    realignment_applied: Optional[bool] = None,
 ) -> None:
     """Write all output files.
 
@@ -666,6 +746,8 @@ def write_outputs(
         judge_model = JUDGE_MODEL
     if function_tracking is None:
         function_tracking = {}
+    if realignment_applied is None:
+        realignment_applied = bool(function_tracking)
 
     # 1. {judge_name}_judged.jsonl
     with (run_dir / f"{judge_name}_judged.jsonl").open("w", encoding="utf-8") as f:
@@ -738,7 +820,7 @@ def write_outputs(
         "judge_version": judge_version,
         "judge_model": judge_model,
         "judged_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "realignment_applied": bool(function_tracking),
+        "realignment_applied": realignment_applied,
         "function_tracking": function_tracking,
         "turn_taking_failures": turn_taking_analysis.get("failed_turns", []) if turn_taking_analysis else [],
         "turn_taking_affected_instruction": turn_taking_affected_instruction,
@@ -793,7 +875,7 @@ def write_outputs(
     # Add realignment notes if any
     if realignment_notes:
         lines.extend([
-            f"## Realignment Analysis",
+            f"## Realignment / Mode Notes",
             f"",
             realignment_notes,
             f"",
@@ -940,6 +1022,8 @@ def main():
         result.get("function_tracking", {}),
         result.get("turn_taking_analysis"),
         expected_turns=expected_turns,
+        judge_version=result.get("judge_version"),
+        realignment_applied=result.get("cross_turn_realignment_applied"),
     )
 
     # Print summary (tool/instruction/kb out of 75; ambiguity/state out of applicable)

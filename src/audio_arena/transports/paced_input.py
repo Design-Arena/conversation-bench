@@ -178,9 +178,30 @@ class PacedInputTransport(BaseInputTransport):
 
     async def stop(self, frame):
         await super().stop(frame)
+        self.shutdown_feeder()
+
+    def shutdown_feeder(self, join_timeout: float = 2.0):
+        """Stop the feeder thread even if the transport is mid-wait during teardown."""
         self._stop.set()
+        # Wake all wait points so the feeder can observe _stop and exit promptly.
+        self._ready.set()
+        self._llm_ready.set()
+        self._recording_baseline_event.set()
         if self._feeder and self._feeder.is_alive():
-            self._feeder.join(timeout=1.0)
+            self._feeder.join(timeout=join_timeout)
+
+    def _schedule_on_loop(self, callback) -> bool:
+        """Schedule work from feeder thread; tolerate loop shutdown races during teardown."""
+        try:
+            loop = self.get_event_loop()
+            loop.call_soon_threadsafe(callback)
+            return True
+        except RuntimeError as e:
+            if self._stop.is_set():
+                logger.debug(f"{self}: feeder stopping during loop shutdown ({e})")
+                return False
+            logger.warning(f"{self}: failed to schedule audio frame on event loop: {e}")
+            return False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames, filtering out emulated VAD frames.
@@ -243,8 +264,8 @@ class PacedInputTransport(BaseInputTransport):
                 frame._paced_input_send_time = time.monotonic()
                 if i == 0:
                     logger.info(f"{self}: First pre-roll frame created at monotonic={frame._paced_input_send_time:.3f}")
-                loop = self.get_event_loop()
-                loop.call_soon_threadsafe(lambda f=frame: self.create_task(self.push_audio_frame(f)))
+                if not self._schedule_on_loop(lambda f=frame: self.create_task(self.push_audio_frame(f))):
+                    return
                 # Pace to real time from recording baseline
                 next_time = start_t + ((i + 1) * self._chunk_ms) / 1000.0
                 sleep_for = next_time - time.monotonic()
@@ -325,8 +346,8 @@ class PacedInputTransport(BaseInputTransport):
                 if offset <= chunk_bytes * 3:
                     frame._paced_input_send_time = time.monotonic()
                     logger.debug(f"{self}: Frame created at monotonic={frame._paced_input_send_time:.3f}")
-                loop = self.get_event_loop()
-                loop.call_soon_threadsafe(lambda f=frame: self.create_task(self.push_audio_frame(f)))
+                if not self._schedule_on_loop(lambda f=frame: self.create_task(self.push_audio_frame(f))):
+                    return
 
                 # Schedule next chunk 20ms from the current scheduled time (not from now)
                 # This maintains accurate long-term timing regardless of processing overhead
@@ -345,10 +366,10 @@ class PacedInputTransport(BaseInputTransport):
                 # This triggers manual audio buffer commit and response creation
                 if self._emit_user_stopped_speaking:
                     logger.info(f"{self}: Emitting UserStoppedSpeakingFrame")
-                    loop = self.get_event_loop()
-                    loop.call_soon_threadsafe(
+                    if not self._schedule_on_loop(
                         lambda: self.create_task(self.push_frame(UserStoppedSpeakingFrame()))
-                    )
+                    ):
+                        return
 
             # NOTE: By default we do not send UserStoppedSpeakingFrame here.
             # For realtime/live models with server-side VAD, we rely on the server
