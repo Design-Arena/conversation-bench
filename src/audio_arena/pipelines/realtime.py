@@ -272,8 +272,9 @@ class TurnGate(FrameProcessor):
         """Check if model never responded after user stopped speaking."""
         try:
             await asyncio.sleep(self._no_response_timeout)
-            # If no TTS started and bot never spoke, model didn't respond at all
-            if not self._tts_started and not self._bot_speaking:
+            # Treat any downstream text/audio activity as a valid response, even if
+            # the coarser TTS/bot state has not updated yet.
+            if not self.has_response_activity():
                 logger.warning(
                     f"[NO_RESPONSE] No TTS response after {self._no_response_timeout}s"
                 )

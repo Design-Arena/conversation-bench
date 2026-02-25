@@ -1,10 +1,17 @@
 import argparse
+import importlib
 import json
+import sys
 from collections import Counter
 from datetime import datetime, UTC
 from pathlib import Path
 
 import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 SCORE_COLUMNS = [
@@ -40,6 +47,61 @@ def percentile(values: pd.Series, quantile: float) -> float | None:
     if clean_values.empty:
         return None
     return round(float(clean_values.quantile(quantile)), 2)
+
+
+def path_to_file_url(path: Path) -> str:
+    return path.resolve().as_uri()
+
+
+def turn_audio_path(benchmark_name: str, turn: int) -> Path:
+    return Path.cwd() / "benchmarks" / benchmark_name / "audio" / f"turn_{turn:03d}.wav"
+
+
+def load_benchmark_turns(benchmark_name: str) -> list[dict]:
+    turns_path = PROJECT_ROOT / "benchmarks" / benchmark_name / "turns.py"
+    if not turns_path.exists():
+        raise FileNotFoundError(f"Benchmark turns file not found: {turns_path}")
+
+    spec = importlib.util.spec_from_file_location(
+        f"{benchmark_name}_turns_module",
+        turns_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load benchmark turns from {turns_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.turns
+
+
+def normalize_tool_entries(value: object) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def format_golden_context_block(turn_number: int, benchmark_turn: dict) -> str:
+    lines = [
+        f"Turn {turn_number}",
+        f"User: {benchmark_turn.get('input', '')}",
+    ]
+
+    tool_calls = normalize_tool_entries(benchmark_turn.get("required_function_call"))
+    tool_results = normalize_tool_entries(benchmark_turn.get("function_call_response"))
+
+    for index, tool_call in enumerate(tool_calls):
+        tool_name = tool_call.get("name", "unknown_tool")
+        tool_args = json.dumps(tool_call.get("args", {}), ensure_ascii=False)
+        lines.append(f"  [Tool call: {tool_name}({tool_args})]")
+        if index < len(tool_results):
+            lines.append(
+                f"  [Tool result: {json.dumps(tool_results[index], ensure_ascii=False)}]"
+            )
+
+    lines.append(f"Assistant: {benchmark_turn.get('golden_text', '')}")
+    return "\n".join(lines)
 
 
 def build_record(raw_record: dict) -> dict:
@@ -240,6 +302,162 @@ def build_error_analysis(
         "- Add explicit ambiguity handling guardrails for abbreviated names (for example, 'Dr. Liu') and remove unnecessary reconfirmation when the user already supplied a valid identifier."
     )
     return "\n".join(lines) + "\n"
+
+
+def build_review_payload(
+    run_dir: Path,
+    *,
+    output_dir: Path | None = None,
+) -> tuple[dict, pd.DataFrame, str, dict]:
+    run_dir = run_dir.resolve()
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+    benchmark_name = run_dir.parent.name
+    run_id = run_dir.name
+    resolved_output_dir = (output_dir or run_dir).resolve()
+    benchmark_turns = load_benchmark_turns(benchmark_name)
+
+    judged_path = run_dir / "openai_judged.jsonl"
+    summary_path = run_dir / "openai_summary.json"
+    runtime_path = run_dir / "runtime.json"
+    transcript_path = run_dir / "transcript.jsonl"
+
+    required_paths = [judged_path, summary_path, runtime_path, transcript_path]
+    missing_paths = [str(path) for path in required_paths if not path.exists()]
+    if missing_paths:
+        raise FileNotFoundError(
+            "Missing required input files:\n" + "\n".join(missing_paths)
+        )
+
+    judged_rows = load_jsonl(judged_path)
+    if not judged_rows:
+        raise ValueError(f"No rows found in {judged_path}")
+
+    normalized_rows = [build_record(raw_record) for raw_record in judged_rows]
+    flattened_rows = pd.DataFrame(normalized_rows).sort_values("turn").reset_index(drop=True)
+    flattened_rows["golden_user_text"] = flattened_rows["turn"].map(
+        lambda turn_value: benchmark_turns[int(turn_value)]["input"]
+    )
+    flattened_rows["golden_assistant_text"] = flattened_rows["turn"].map(
+        lambda turn_value: benchmark_turns[int(turn_value)]["golden_text"]
+    )
+    flattened_rows["golden_tool_calls"] = flattened_rows["turn"].map(
+        lambda turn_value: normalize_tool_entries(
+            benchmark_turns[int(turn_value)].get("required_function_call")
+        )
+    )
+    flattened_rows["golden_tool_results"] = flattened_rows["turn"].map(
+        lambda turn_value: normalize_tool_entries(
+            benchmark_turns[int(turn_value)].get("function_call_response")
+        )
+    )
+    flattened_rows["golden_tool_calls_text"] = flattened_rows["golden_tool_calls"].map(
+        lambda tool_calls: json.dumps(tool_calls, ensure_ascii=False, indent=2)
+    )
+    flattened_rows["golden_tool_results_text"] = flattened_rows["golden_tool_results"].map(
+        lambda tool_results: json.dumps(tool_results, ensure_ascii=False, indent=2)
+    )
+    flattened_rows["golden_context_block"] = flattened_rows["turn"].map(
+        lambda turn_value: format_golden_context_block(
+            int(turn_value),
+            benchmark_turns[int(turn_value)],
+        )
+    )
+
+    flattened_rows["user_audio_path"] = flattened_rows["turn"].map(
+        lambda turn_value: str(turn_audio_path(benchmark_name, int(turn_value)))
+    )
+    flattened_rows["user_audio_url"] = flattened_rows["turn"].map(
+        lambda turn_value: path_to_file_url(turn_audio_path(benchmark_name, int(turn_value)))
+    )
+    flattened_rows["user_audio_exists"] = flattened_rows["turn"].map(
+        lambda turn_value: turn_audio_path(benchmark_name, int(turn_value)).exists()
+    )
+
+    for column in SCORE_COLUMNS:
+        flattened_rows[column] = flattened_rows["scores"].map(
+            lambda row_scores: row_scores.get(column)
+        )
+
+    sanity_report = build_sanity_report(flattened_rows)
+    if sanity_report["duplicate_turn_rows"]:
+        raise ValueError(
+            f"Duplicate turn rows found in review data: {sanity_report['duplicate_turn_rows']}"
+        )
+
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    runtime_payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+
+    latency_values = pd.to_numeric(flattened_rows["latency_ms"], errors="coerce")
+    ttfb_values = pd.to_numeric(flattened_rows["ttfb_ms"], errors="coerce")
+
+    latency_summary = {
+        "p50": percentile(latency_values, 0.50),
+        "p90": percentile(latency_values, 0.90),
+        "p95": percentile(latency_values, 0.95),
+        "p99": percentile(latency_values, 0.99),
+        "mean": round(float(latency_values.dropna().mean()), 2),
+    }
+    ttfb_summary = {
+        "p50": percentile(ttfb_values, 0.50),
+        "p90": percentile(ttfb_values, 0.90),
+        "p95": percentile(ttfb_values, 0.95),
+        "p99": percentile(ttfb_values, 0.99),
+        "mean": round(float(ttfb_values.dropna().mean()), 2),
+    }
+
+    overall_pass_rows = int((flattened_rows["overall_status"] == "pass").sum())
+    empty_response_count = int(
+        (flattened_rows["response_status"] == "empty_response").sum()
+    )
+
+    error_analysis = build_error_analysis(
+        flattened_rows=flattened_rows,
+        summary_payload=summary_payload,
+        latency_summary=latency_summary,
+    )
+
+    dimension_summary = build_dimension_summary(flattened_rows)
+    metadata = {
+        "benchmark_name": benchmark_name,
+        "run_id": run_id,
+        "model_name": summary_payload.get("model_name"),
+        "judge_name": summary_payload.get("judge_name"),
+        "judge_model": summary_payload.get("judge_model"),
+        "judge_version": summary_payload.get("judge_version"),
+        "judged_at": summary_payload.get("judged_at"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        ),
+        "source_run_dir": str(run_dir),
+        "output_dir": str(resolved_output_dir),
+        "turn_count": int(len(flattened_rows)),
+        "runtime_mode": runtime_payload.get("mode"),
+        "runtime_parallel": runtime_payload.get("parallel"),
+        "disable_vad": runtime_payload.get("disable_vad"),
+        "conversation_audio_path": str(run_dir / "conversation.wav"),
+        "conversation_audio_url": path_to_file_url(run_dir / "conversation.wav"),
+        "conversation_audio_exists": (run_dir / "conversation.wav").exists(),
+    }
+
+    payload = {
+        "metadata": metadata,
+        "summary": {
+            "passes": summary_payload.get("passes", {}),
+            "category_totals": summary_payload.get("category_totals", {}),
+            "function_tracking": summary_payload.get("function_tracking", {}),
+            "turn_taking_failures": summary_payload.get("turn_taking_failures", []),
+            "overall_pass_rows": overall_pass_rows,
+            "empty_response_count": empty_response_count,
+        },
+        "latency_ms": latency_summary,
+        "ttfb_ms": ttfb_summary,
+        "dimension_summary": dimension_summary,
+        "sanity_checks": sanity_report,
+        "rows": flattened_rows.to_dict(orient="records"),
+    }
+    return payload, flattened_rows, error_analysis, sanity_report
 
 
 def build_html(payload: dict) -> str:
@@ -588,8 +806,17 @@ def build_html(payload: dict) -> str:
       max-height: 360px;
     }}
 
+    .context-box {{
+      max-height: 320px;
+    }}
+
     .reason-box {{
       max-height: 220px;
+    }}
+
+    audio {{
+      width: 100%;
+      margin-top: 8px;
     }}
 
     .subtle {{
@@ -977,6 +1204,11 @@ def build_html(payload: dict) -> str:
       }}
 
       const row = rows.find((item) => item.turn === selectedTurn) || rows[0];
+      const previousContext = allRows
+        .filter((item) => item.turn < row.turn)
+        .sort((left, right) => left.turn - right.turn)
+        .map((item) => item.golden_context_block || `Turn ${{item.turn}}\\nUser: ${{item.golden_user_text || item.user_text}}\\nAssistant: ${{item.golden_assistant_text || item.assistant_text}}`)
+        .join("\\n\\n");
       const graderRows = payload.dimension_summary.map((summaryRow) => {{
         const value = row.scores[summaryRow.dimension];
         const status = value === true ? 'pass' : value === false ? 'fail' : 'incomplete';
@@ -1013,6 +1245,20 @@ def build_html(payload: dict) -> str:
           </div>
           <div class="detail-layout">
             <div class="stack">
+              <div class="text-card">
+                <div class="label">Current Turn Audio</div>
+                <div class="subtle">Benchmark input audio for the selected user turn.</div>
+                ${{row.user_audio_exists ? `<audio controls preload="none" src="${{escapeHtml(row.user_audio_url)}}"></audio>` : `<div class="subtle" style="margin-top: 8px;">No per-turn input audio file found.</div>`}}
+              </div>
+              <div class="text-card">
+                <div class="label">Full Conversation Audio</div>
+                <div class="subtle">Run-level merged audio saved for the full benchmark conversation.</div>
+                ${{payload.metadata.conversation_audio_exists ? `<audio controls preload="none" src="${{escapeHtml(payload.metadata.conversation_audio_url)}}"></audio>` : `<div class="subtle" style="margin-top: 8px;">No conversation.wav found for this run.</div>`}}
+              </div>
+              <div class="text-card">
+                <div class="label">Gold Previous Turns Context</div>
+                <div class="scroll-box context-box">${{escapeHtml(previousContext || 'No previous turns.')}}</div>
+              </div>
               <div class="text-card">
                 <div class="label">User Query</div>
                 <div class="scroll-box short-box">${{escapeHtml(row.user_text)}}</div>
@@ -1104,70 +1350,19 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
-    if not run_dir.exists():
-        raise FileNotFoundError(f"Run directory not found: {run_dir}")
 
     benchmark_name = run_dir.parent.name
     run_id = run_dir.name
-
-    judged_path = run_dir / "openai_judged.jsonl"
-    summary_path = run_dir / "openai_summary.json"
-    runtime_path = run_dir / "runtime.json"
-    transcript_path = run_dir / "transcript.jsonl"
-
-    required_paths = [judged_path, summary_path, runtime_path, transcript_path]
-    missing_paths = [str(path) for path in required_paths if not path.exists()]
-    if missing_paths:
-        raise FileNotFoundError(
-            "Missing required input files:\n" + "\n".join(missing_paths)
-        )
-
     default_output_dir = (
         Path.cwd() / "results" / benchmark_name / run_id
     )
     output_dir = Path(args.output_dir).resolve() if args.output_dir else default_output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    judged_rows = load_jsonl(judged_path)
-    if not judged_rows:
-        raise ValueError(f"No rows found in {judged_path}")
-
-    normalized_rows = [build_record(raw_record) for raw_record in judged_rows]
-    flattened_rows = pd.DataFrame(normalized_rows).sort_values("turn").reset_index(drop=True)
-
-    for column in SCORE_COLUMNS:
-        flattened_rows[column] = flattened_rows["scores"].map(lambda row_scores: row_scores.get(column))
-
-    sanity_report = build_sanity_report(flattened_rows)
-    if sanity_report["duplicate_turn_rows"]:
-        raise ValueError(
-            f"Duplicate turn rows found in review data: {sanity_report['duplicate_turn_rows']}"
-        )
-
-    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
-    runtime_payload = json.loads(runtime_path.read_text(encoding="utf-8"))
-
-    latency_values = pd.to_numeric(flattened_rows["latency_ms"], errors="coerce")
-    ttfb_values = pd.to_numeric(flattened_rows["ttfb_ms"], errors="coerce")
-
-    latency_summary = {
-        "p50": percentile(latency_values, 0.50),
-        "p90": percentile(latency_values, 0.90),
-        "p95": percentile(latency_values, 0.95),
-        "p99": percentile(latency_values, 0.99),
-        "mean": round(float(latency_values.dropna().mean()), 2),
-    }
-    ttfb_summary = {
-        "p50": percentile(ttfb_values, 0.50),
-        "p90": percentile(ttfb_values, 0.90),
-        "p95": percentile(ttfb_values, 0.95),
-        "p99": percentile(ttfb_values, 0.99),
-        "mean": round(float(ttfb_values.dropna().mean()), 2),
-    }
-
-    overall_pass_rows = int((flattened_rows["overall_status"] == "pass").sum())
-    empty_response_count = int((flattened_rows["response_status"] == "empty_response").sum())
-
+    payload, flattened_rows, error_analysis, sanity_report = build_review_payload(
+        run_dir,
+        output_dir=output_dir,
+    )
     csv_columns = [
         "turn",
         "timestamp",
@@ -1191,54 +1386,21 @@ def main() -> None:
         "judge_reasoning",
         "tool_calls_text",
         "tool_results_text",
+        "user_audio_path",
+        "user_audio_url",
+        "user_audio_exists",
+        "golden_user_text",
+        "golden_assistant_text",
+        "golden_tool_calls_text",
+        "golden_tool_results_text",
+        "golden_context_block",
     ]
     flattened_rows[csv_columns].to_csv(
         output_dir / "review_rows.csv",
         index=False,
         encoding="utf-8",
     )
-
-    error_analysis = build_error_analysis(
-        flattened_rows=flattened_rows,
-        summary_payload=summary_payload,
-        latency_summary=latency_summary,
-    )
     (output_dir / "error_analysis.md").write_text(error_analysis, encoding="utf-8")
-
-    dimension_summary = build_dimension_summary(flattened_rows)
-    metadata = {
-        "benchmark_name": benchmark_name,
-        "run_id": run_id,
-        "model_name": summary_payload.get("model_name"),
-        "judge_name": summary_payload.get("judge_name"),
-        "judge_model": summary_payload.get("judge_model"),
-        "judge_version": summary_payload.get("judge_version"),
-        "judged_at": summary_payload.get("judged_at"),
-        "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "source_run_dir": str(run_dir),
-        "output_dir": str(output_dir),
-        "turn_count": int(len(flattened_rows)),
-        "runtime_mode": runtime_payload.get("mode"),
-        "runtime_parallel": runtime_payload.get("parallel"),
-        "disable_vad": runtime_payload.get("disable_vad"),
-    }
-
-    payload = {
-        "metadata": metadata,
-        "summary": {
-            "passes": summary_payload.get("passes", {}),
-            "category_totals": summary_payload.get("category_totals", {}),
-            "function_tracking": summary_payload.get("function_tracking", {}),
-            "turn_taking_failures": summary_payload.get("turn_taking_failures", []),
-            "overall_pass_rows": overall_pass_rows,
-            "empty_response_count": empty_response_count,
-        },
-        "latency_ms": latency_summary,
-        "ttfb_ms": ttfb_summary,
-        "dimension_summary": dimension_summary,
-        "sanity_checks": sanity_report,
-        "rows": flattened_rows.to_dict(orient="records"),
-    }
 
     html = build_html(payload)
     (output_dir / "review.html").write_text(html, encoding="utf-8")
