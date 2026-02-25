@@ -23,19 +23,23 @@ import numpy as np
 import soundfile as sf
 from loguru import logger
 from pipecat.frames.frames import (
+    BotSpeakingFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
     InterruptionFrame,
     LLMContextFrame,
+    LLMTextFrame,
     LLMMessagesAppendFrame,
     LLMRunFrame,
     MetricsFrame,
     OutputAudioRawFrame,
     TranscriptionMessage,
+    TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    TTSTextFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -150,6 +154,11 @@ class TurnGate(FrameProcessor):
         self._tts_started = False
         self._no_response_check_task: Optional[asyncio.Task] = None
         self._on_empty_response: Optional[Callable[[str], None]] = None
+        # Recent raw output activity is a stronger signal than turn state alone.
+        # This lets the watchdog treat in-flight text/audio as active even if the
+        # higher-level TTS/Bot state has not caught up yet.
+        self._last_output_activity_monotonic: float = 0.0
+        self._recent_output_activity_window_secs: float = 3.0
 
         # Initial greeting detection
         self._on_greeting_done = on_greeting_done
@@ -198,6 +207,7 @@ class TurnGate(FrameProcessor):
         self._turn_transcript_parts = []
         self._tts_started = False
         self._bot_speaking = False
+        self._last_output_activity_monotonic = 0.0
         if self._turn_end_task and not self._turn_end_task.done():
             self._turn_end_task.cancel()
             self._turn_end_task = None
@@ -207,12 +217,25 @@ class TurnGate(FrameProcessor):
 
     def has_response_activity(self) -> bool:
         """Return True when the model has started producing output for this turn."""
+        recent_output_activity = (
+            self._last_output_activity_monotonic > 0
+            and (time.monotonic() - self._last_output_activity_monotonic)
+            <= self._recent_output_activity_window_secs
+        )
         return bool(
             self._bot_speaking
             or self._tts_started
             or self._pending_transcript is not None
             or self._turn_transcript_parts
+            or recent_output_activity
         )
+
+    def _mark_output_activity(self):
+        """Record recent downstream output and stop the no-response timer."""
+        self._last_output_activity_monotonic = time.monotonic()
+        if self._no_response_check_task and not self._no_response_check_task.done():
+            self._no_response_check_task.cancel()
+            self._no_response_check_task = None
 
     def _is_empty_transcript(self, text: str) -> bool:
         """Check if transcript is empty or only contains control tokens."""
@@ -262,6 +285,21 @@ class TurnGate(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Watch for TTS and Bot speaking frames to manage turn advancement."""
         await super().process_frame(frame, direction)
+
+        # Raw downstream output is the most reliable "model is actively responding"
+        # signal. Track it directly so watchdogs do not race against delayed
+        # BotStopped/TTS bookkeeping.
+        if isinstance(
+            frame,
+            (
+                BotSpeakingFrame,
+                BotStartedSpeakingFrame,
+                LLMTextFrame,
+                TTSAudioRawFrame,
+                TTSTextFrame,
+            ),
+        ):
+            self._mark_output_activity()
 
         # allow_interruptions=False should prevent this, but log if it still
         # arrives via a Pipecat internal edge case.
