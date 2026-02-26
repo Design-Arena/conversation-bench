@@ -18,6 +18,7 @@ The skill is designed for:
 The output is a markdown report under `results/` that explains:
 - dominant failed dimensions per model
 - major error-mode clusters
+- a plain-language description of each error mode per model
 - representative failing turns
 - shared failures across models
 - model-specific unique failures and unique passes
@@ -130,6 +131,16 @@ Example:
 - Use exact dimension counts from judged rows.
 - Treat broader “error modes” as analyst/script-defined clusters, not as a second judge.
 - Cite representative turn numbers in the report.
+- For each model, describe each major error mode in plain language:
+  - what the model is doing wrong
+  - what kinds of turns trigger it
+  - what grader-visible dimensions it usually causes
+- For each major error mode, include concrete datapoints to review quickly:
+  - turn number
+  - user input
+  - assistant output
+  - judge reasoning
+  - tool calls / tool results when relevant
 - Prefer comparing models on:
   - dominant failure dimensions
   - response-pattern failures

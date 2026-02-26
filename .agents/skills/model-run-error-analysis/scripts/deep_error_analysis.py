@@ -5,6 +5,34 @@ from pathlib import Path
 
 import pandas as pd
 
+ERROR_MODE_DESCRIPTIONS = {
+    "premature_end_session": (
+        "The model terminates the session instead of answering or completing the workflow. "
+        "This usually manifests as instruction-following failures and can also truncate multi-step tool tasks."
+    ),
+    "empty_response": (
+        "The model returns no usable response after retries. This is an execution failure rather than a content error."
+    ),
+    "partial_multi_tool_execution": (
+        "The model starts a batch, fallback, or multi-step tool workflow but stops before all required actions are complete."
+    ),
+    "state_memory_failure": (
+        "The model loses track of previously established conversation state, such as the known user name, prior actions, or previously given facts."
+    ),
+    "ambiguity_handling_failure": (
+        "The model mishandles ambiguity by over-clarifying when the intent is clear or by guessing when it should first disambiguate."
+    ),
+    "knowledge_grounding_error": (
+        "The model gives schedule, logistics, pricing, or speaker facts that do not match the benchmark source of truth."
+    ),
+    "tool_or_action_selection_error": (
+        "The model chooses the wrong tool behavior, misses a required tool call, or performs an extra action not requested by the user."
+    ),
+    "other": (
+        "The failure does not fit the main candidate buckets cleanly and needs direct inspection of the datapoints to determine the true cause."
+    ),
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -60,6 +88,13 @@ def load_rows(run_dir: Path) -> list[dict]:
 
 def serialize_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True)
+
+
+def truncate_text(value: object, limit: int = 320) -> str:
+    text = str(value).replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def classify_error_mode(row: dict) -> str:
@@ -153,6 +188,9 @@ def representative_examples(run_rows: list[dict], limit_per_mode: int = 5) -> di
                 "turn": row["turn"],
                 "user_text": row["user_text"],
                 "assistant_text": row["assistant_text"],
+                "judge_reasoning": row.get("judge_reasoning", ""),
+                "tool_calls": row.get("tool_calls", []),
+                "tool_results": row.get("tool_results", []),
                 "failed_dimensions": failed,
             }
         )
@@ -298,15 +336,29 @@ def write_report(
             lines.append(f"- `{error_mode}`: `{count}`")
         lines.append("")
 
-        for error_mode, count in mode_counts.most_common(3):
+        for error_mode, count in mode_counts.most_common(4):
             lines.append(f"### `{error_mode}`")
             lines.append("")
+            lines.append(ERROR_MODE_DESCRIPTIONS.get(error_mode, ERROR_MODE_DESCRIPTIONS["other"]))
+            lines.append("")
             for example in model_examples.get(error_mode, []):
-                user_text = str(example["user_text"]).replace("\n", " ")
                 lines.append(
                     f"- Turn `{example['turn']}` "
-                    f"(`{', '.join(example['failed_dimensions'])}`): {user_text}"
+                    f"(`{', '.join(example['failed_dimensions'])}`)"
                 )
+                lines.append(f"  - User: {truncate_text(example['user_text'])}")
+                lines.append(f"  - Assistant: {truncate_text(example['assistant_text'])}")
+                lines.append(
+                    f"  - Judge: {truncate_text(example['judge_reasoning'])}"
+                )
+                if example["tool_calls"]:
+                    lines.append(
+                        f"  - Tool calls: {truncate_text(serialize_json(example['tool_calls']), 260)}"
+                    )
+                if example["tool_results"]:
+                    lines.append(
+                        f"  - Tool results: {truncate_text(serialize_json(example['tool_results']), 260)}"
+                    )
             lines.append("")
 
         lines.append("Unique deltas:")
