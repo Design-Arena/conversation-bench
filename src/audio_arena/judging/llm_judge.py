@@ -888,7 +888,39 @@ def write_outputs(
             "| Function | Expected Turn | Actual Turn | Status |",
             "|----------|---------------|-------------|--------|",
         ])
-        for func_name, tracking in function_tracking.items():
+        if isinstance(function_tracking, dict):
+            tracking_items = []
+            for func_name, tracking in function_tracking.items():
+                if isinstance(tracking, dict):
+                    tracking_items.append((func_name, tracking))
+                elif isinstance(tracking, list):
+                    for index, nested_tracking in enumerate(tracking):
+                        if isinstance(nested_tracking, dict):
+                            tracking_items.append(
+                                (
+                                    nested_tracking.get("function")
+                                    or nested_tracking.get("function_name")
+                                    or nested_tracking.get("name")
+                                    or f"{func_name}[{index}]",
+                                    nested_tracking,
+                                )
+                            )
+        elif isinstance(function_tracking, list):
+            tracking_items = [
+                (
+                    tracking.get("function")
+                    or tracking.get("function_name")
+                    or tracking.get("name")
+                    or f"entry_{index}",
+                    tracking,
+                )
+                for index, tracking in enumerate(function_tracking)
+                if isinstance(tracking, dict)
+            ]
+        else:
+            tracking_items = []
+
+        for func_name, tracking in tracking_items:
             exp = tracking.get('expected_turn', '?')
             act = tracking.get('actual_turn', '?')
             status = tracking.get('status', '?')
