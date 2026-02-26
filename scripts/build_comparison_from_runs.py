@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
 
 def infer_model_name(run_dir: Path) -> str:
     parts = run_dir.name.split("_")
-    if len(parts) < 4:
+    if len(parts) < 3:
         raise ValueError(f"Unexpected run directory name: {run_dir.name}")
     return "_".join(parts[1:-1])
 
