@@ -115,6 +115,10 @@ Example:
 
 12. Use the provisional clusters only to accelerate review. They are not the final truth.
 13. Write `deep_error_analysis.md` with buckets that reflect the underlying error mechanism.
+14. In the final assistant response, also provide a concise plain-text summary of the findings:
+   - main error modes per model
+   - the most important shared hard turns or shared failure themes
+   - the path to the saved markdown report
 
 ## Output expectations
 
@@ -122,6 +126,7 @@ Example:
 - Also write:
   - `failure_review_rows.jsonl`
   - `failure_review_rows.csv`
+- Also return a text summary to the user in the same turn. Do not make the markdown file the only deliverable.
 - Use exact dimension counts from judged rows.
 - Treat broader “error modes” as analyst/script-defined clusters, not as a second judge.
 - Cite representative turn numbers in the report.

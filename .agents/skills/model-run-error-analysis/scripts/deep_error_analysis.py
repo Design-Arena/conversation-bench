@@ -231,7 +231,7 @@ def write_report(
     output_path: Path,
     run_dirs: list[Path],
     run_payloads: dict[str, list[dict]],
-) -> None:
+) -> str:
     model_order = list(run_payloads.keys())
     top_lines = {
         model_name: exact_top_lines(run_payloads[model_name]) for model_name in model_order
@@ -318,8 +318,9 @@ def write_report(
         )
         lines.append("")
 
+    report_text = "\n".join(lines).rstrip() + "\n"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    output_path.write_text(report_text, encoding="utf-8")
     failure_review_df = build_failure_review_rows(run_payloads)
     if not failure_review_df.empty:
         failure_review_df.to_csv(
@@ -330,6 +331,7 @@ def write_report(
         with failure_review_jsonl_path.open("w", encoding="utf-8") as handle:
             for record in failure_review_df.to_dict(orient="records"):
                 handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+    return report_text
 
 
 def main() -> None:
@@ -353,12 +355,35 @@ def main() -> None:
             / "deep_error_analysis.md"
         )
 
-    write_report(
+    report_text = write_report(
         output_path=output_path,
         run_dirs=run_dirs,
         run_payloads=run_payloads,
     )
-    print(output_path)
+    summary_lines: list[str] = []
+    for model_name, run_rows in run_payloads.items():
+        stats = exact_top_lines(run_rows)
+        top_dimensions = ", ".join(
+            f"{dimension}={count}"
+            for dimension, count in stats["dimension_counter"].most_common(3)
+        )
+        summary_lines.append(
+            f"{model_name}: failed_rows={stats['failed_rows']}, "
+            f"ended_session={stats['ended_session']}, "
+            f"empty_response={stats['empty_response']}, "
+            f"top_failed_dimensions={top_dimensions}"
+        )
+
+    print(f"Saved markdown report: {output_path}")
+    failure_csv_path = output_path.parent / "failure_review_rows.csv"
+    if failure_csv_path.exists():
+        print(f"Saved review packet CSV: {failure_csv_path}")
+    failure_jsonl_path = output_path.parent / "failure_review_rows.jsonl"
+    if failure_jsonl_path.exists():
+        print(f"Saved review packet JSONL: {failure_jsonl_path}")
+    print("Summary:")
+    for line in summary_lines:
+        print(f"- {line}")
 
 
 if __name__ == "__main__":
