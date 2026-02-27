@@ -1,5 +1,5 @@
 """
-OpenAI-based transcript judge (realignment + over-clarification handling).
+OpenAI-based transcript judge (mode-aware realignment + over-clarification handling).
 
 Mirrors the Claude judge but uses OpenAI's chat completions API.
 Shares the same system prompt and evaluation methodology.
@@ -9,24 +9,23 @@ Usage via CLI:
     uv run audio-arena judge runs/... --judge openai --judge-model o3
 """
 
-import os
 import sys
 import json
-import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from dotenv import load_dotenv
-
 from .llm_judge import (
-    JUDGE_SYSTEM_PROMPT,
+    build_judge_summary,
+    build_judge_system_prompt,
+    build_judge_user_prompt,
     format_turns_for_judge,
     load_transcript,
-    write_outputs,
+    uses_cross_turn_realignment,
 )
 
 
 OPENAI_JUDGE_VERSION = "openai-v1-state-absorbs-tool-penalty"
+OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v2-rehydrated-no-realignment-state-absorbs-tool-penalty"
 OPENAI_JUDGE_MODEL = "gpt-5.2"
 
 
@@ -39,7 +38,7 @@ async def judge_with_openai(
     get_relevant_dimensions_fn=None,
     model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Main judging function using OpenAI, with two-phase realignment approach.
+    """Main judging function using OpenAI with mode-aware scoring.
 
     Args:
         run_dir: Path to the run directory containing transcript.jsonl
@@ -75,8 +74,14 @@ async def judge_with_openai(
 
     model_name = records[0].get("model_name", "unknown")
 
+    cross_turn_realignment = uses_cross_turn_realignment(run_dir)
+    judge_version = (
+        OPENAI_JUDGE_VERSION if cross_turn_realignment else OPENAI_REHYDRATED_JUDGE_VERSION
+    )
+
     if debug:
-        print(f"Judging {len(records)} turns with OpenAI ({judge_model})...", file=sys.stderr)
+        mode_label = "with cross-turn realignment" if cross_turn_realignment else "without cross-turn realignment"
+        print(f"Judging {len(records)} turns {mode_label} with OpenAI ({judge_model})...", file=sys.stderr)
 
     # Run turn-taking analysis if WAV file exists
     turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None
@@ -107,25 +112,8 @@ async def judge_with_openai(
         records, expected_turns, only_turns, turn_taking_data, get_relevant_dimensions_fn
     )
 
-    prompt = f"""{formatted_turns}
-
-Please perform your two-phase evaluation:
-1. First, analyze each turn against its golden expectation
-2. Then, identify any turn misalignments (early/late function calls)
-3. Apply realignment adjustments to avoid double-penalizing
-4. Output the final JSON with judgments for ALL {len(records)} turns
-
-CRITICAL: Your final_judgments array MUST contain exactly {len(records)} entries (turns 0-{len(records)-1}).
-
-Remember:
-- If a function is called early (before expected turn), subsequent turns should not be penalized for the "missing" call
-- If a function is called late, credit the turn that did call it (tool_use_correct=TRUE). For the turn that should have called: if they **over-clarified** and ambiguity_handling is in Score Dimensions → tool_use_correct=TRUE, ambiguity_handling=FALSE; if they **forgot state** and state_tracking is in Score Dimensions → tool_use_correct=TRUE, state_tracking=FALSE; if neither dimension can absorb → tool_use_correct=FALSE; if they asked for unnecessary confirmation → tool_use_correct=FALSE
-- **Penalty absorption rule**: When a tool call is missed due to a more specific root cause, the penalty lands on the specific dimension (ambiguity_handling or state_tracking) if it's in Score Dimensions. If the specific dimension is NOT in Score Dimensions, fall back to tool_use_correct=FALSE. The penalty must always land somewhere.
-- Missing/wrong tool call (not over-clarification or state failure) → tool_use_correct=FALSE only; do not fail instruction_following
-- Words contradict actions (e.g. says "I'll wait" but calls in same turn) → tool_use_correct=FALSE and instruction_following=FALSE
-- Be generous with kb_grounding unless there's a clear factual error
-- Empty assistant_text with a valid tool call is still a valid turn - evaluate the tool call
-"""
+    prompt = build_judge_user_prompt(formatted_turns, len(records), cross_turn_realignment)
+    system_prompt = build_judge_system_prompt(cross_turn_realignment)
 
     client = AsyncOpenAI()
 
@@ -134,9 +122,9 @@ Remember:
 
     messages = []
     if is_o_series:
-        messages.append({"role": "developer", "content": JUDGE_SYSTEM_PROMPT})
+        messages.append({"role": "developer", "content": system_prompt})
     else:
-        messages.append({"role": "system", "content": JUDGE_SYSTEM_PROMPT})
+        messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
     kwargs: Dict[str, Any] = {
@@ -230,8 +218,10 @@ Remember:
         "judgments": judgments,
         "realignment_notes": realignment_notes,
         "function_tracking": function_tracking,
+        "cross_turn_realignment_applied": cross_turn_realignment,
         "turn_taking_analysis": turn_taking_analysis.to_dict() if turn_taking_analysis else None,
-        "summary": f"Evaluated {len(judgments)} turns with realignment.",
+        "summary": build_judge_summary(len(judgments), cross_turn_realignment),
         "model_name": model_name,
         "judge_model": judge_model,
+        "judge_version": judge_version,
     }

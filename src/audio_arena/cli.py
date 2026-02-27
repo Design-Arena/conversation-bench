@@ -153,6 +153,48 @@ def infer_pipeline(model: str) -> str:
     return "text"
 
 
+def get_disable_vad_status_messages(
+    *,
+    disable_vad: bool,
+    rehydrate: bool,
+    pipeline_type: str,
+    service: Optional[str],
+    model: str,
+) -> list[str]:
+    """Return user-visible status/warning messages for --disable-vad behavior."""
+    if not disable_vad:
+        return []
+
+    if pipeline_type != "realtime":
+        return [
+            "[disable-vad] Ignored: --disable-vad only applies to the realtime pipeline.",
+        ]
+
+    service_name = (service or "").lower()
+    if service_name != "openai-realtime":
+        return [
+            f"[disable-vad] Ignored: supported only for --service openai-realtime (got: {service or 'none'}).",
+        ]
+
+    model_name = model.lower()
+    is_openai_realtime_model = model_name.startswith("gpt") and "realtime" in model_name
+    if not is_openai_realtime_model:
+        return [
+            f"[disable-vad] Ignored: model '{model}' is not an OpenAI realtime model.",
+        ]
+
+    if rehydrate:
+        return [
+            "[disable-vad] Active: server-side VAD disabled for OpenAI Realtime.",
+            "[disable-vad] Active: using manual response.create(input=...) rehydration flow.",
+        ]
+
+    return [
+        "[disable-vad] Active: server-side VAD disabled for OpenAI Realtime.",
+        "[disable-vad] Note: manual response.create(input=...) hydration only applies with --rehydrate.",
+    ]
+
+
 def create_run_directory(benchmark_name: str, model: str) -> Path:
     """Create timestamped run directory."""
     import uuid
@@ -222,6 +264,11 @@ def cli():
     default=1,
     help="Max concurrent turns in rehydrated mode (default: 1 = sequential). Ignored for normal runs.",
 )
+@click.option(
+    "--disable-vad",
+    is_flag=True,
+    help="Disable server-side VAD for compatible realtime models (manual response.create flow).",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def run(
     benchmark_name: str,
@@ -231,6 +278,7 @@ def run(
     only_turns: Optional[str],
     rehydrate: bool,
     parallel: int,
+    disable_vad: bool,
     verbose: bool,
 ):
     """Run a benchmark against an LLM.
@@ -248,10 +296,29 @@ def run(
 
     if rehydrate:
         asyncio.run(
-            _run_rehydrated(benchmark_name, model, service, pipeline, only_turns, verbose, parallel)
+            _run_rehydrated(
+                benchmark_name,
+                model,
+                service,
+                pipeline,
+                only_turns,
+                verbose,
+                parallel,
+                disable_vad=disable_vad,
+            )
         )
     else:
-        asyncio.run(_run(benchmark_name, model, service, pipeline, only_turns, verbose))
+        asyncio.run(
+            _run(
+                benchmark_name,
+                model,
+                service,
+                pipeline,
+                only_turns,
+                verbose,
+                disable_vad=disable_vad,
+            )
+        )
 
 
 async def _run(
@@ -261,6 +328,7 @@ async def _run(
     pipeline_type: Optional[str],
     only_turns: Optional[str],
     verbose: bool,
+    disable_vad: bool = False,
 ):
     """Async implementation of the run command."""
     # Load benchmark
@@ -278,6 +346,15 @@ async def _run(
     requires_service = getattr(pipeline_cls, "requires_service", True)
     if requires_service and not service:
         raise click.UsageError(f"--service is required for {pipeline_type} pipeline")
+
+    for msg in get_disable_vad_status_messages(
+        disable_vad=disable_vad,
+        rehydrate=False,
+        pipeline_type=pipeline_type,
+        service=service,
+        model=model,
+    ):
+        click.echo(msg)
 
     # Load service class if provided
     service_class = load_service_class(service) if service else None
@@ -309,6 +386,7 @@ async def _run(
             service_class=service_class,
             service_name=service,
             turn_indices=turn_indices,
+            disable_vad=disable_vad,
         )
         click.echo(f"Completed benchmark run")
         click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
@@ -327,6 +405,7 @@ async def _run_rehydrated(
     only_turns: Optional[str],
     verbose: bool,
     max_parallel: int = 1,
+    disable_vad: bool = False,
 ):
     """Run benchmark in single-step rehydration mode.
 
@@ -351,6 +430,15 @@ async def _run_rehydrated(
     requires_service = getattr(pipeline_cls, "requires_service", True)
     if requires_service and not service:
         raise click.UsageError(f"--service is required for {pipeline_type} pipeline")
+
+    for msg in get_disable_vad_status_messages(
+        disable_vad=disable_vad,
+        rehydrate=True,
+        pipeline_type=pipeline_type,
+        service=service,
+        model=model,
+    ):
+        click.echo(msg)
 
     service_class = load_service_class(service) if service else None
 
@@ -393,6 +481,7 @@ async def _run_rehydrated(
                     service_name=service,
                     turn_indices=[target_idx],
                     rehydration_turns=golden_history,
+                    disable_vad=disable_vad,
                 )
                 results[target_idx] = True
                 click.echo(f"[Rehydration] Turn {target_idx} OK")
@@ -417,6 +506,7 @@ async def _run_rehydrated(
         "failed_turns": failed_turns,
         "mode": "rehydrated",
         "parallel": max_parallel,
+        "disable_vad": disable_vad,
         "note": "Single-step rehydration: each turn evaluated independently with golden prior context",
     }
     (run_dir / "runtime.json").write_text(
@@ -503,7 +593,7 @@ def judge(
         records = [r for r in records if r["turn"] in turn_indices_set]
 
     if judge_backend == "openai":
-        from audio_arena.judging.openai_judge import judge_with_openai, OPENAI_JUDGE_VERSION, OPENAI_JUDGE_MODEL
+        from audio_arena.judging.openai_judge import judge_with_openai, OPENAI_JUDGE_MODEL
 
         effective_model = judge_model or OPENAI_JUDGE_MODEL
         try:
@@ -532,8 +622,9 @@ def judge(
             result.get("turn_taking_analysis"),
             expected_turns=expected_turns,
             judge_name="openai",
-            judge_version=OPENAI_JUDGE_VERSION,
+            judge_version=result.get("judge_version"),
             judge_model=result.get("judge_model", effective_model),
+            realignment_applied=result.get("cross_turn_realignment_applied"),
         )
         summary_file = "openai_summary.json"
 
@@ -565,6 +656,8 @@ def judge(
             result.get("turn_taking_analysis"),
             expected_turns=expected_turns,
             judge_name="claude",
+            judge_version=result.get("judge_version"),
+            realignment_applied=result.get("cross_turn_realignment_applied"),
         )
         summary_file = "claude_summary.json"
 
