@@ -11,6 +11,7 @@ Pipeline:
 """
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -22,19 +23,23 @@ import numpy as np
 import soundfile as sf
 from loguru import logger
 from pipecat.frames.frames import (
+    BotSpeakingFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
     InterruptionFrame,
     LLMContextFrame,
+    LLMTextFrame,
     LLMMessagesAppendFrame,
     LLMRunFrame,
     MetricsFrame,
     OutputAudioRawFrame,
     TranscriptionMessage,
+    TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    TTSTextFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -149,6 +154,11 @@ class TurnGate(FrameProcessor):
         self._tts_started = False
         self._no_response_check_task: Optional[asyncio.Task] = None
         self._on_empty_response: Optional[Callable[[str], None]] = None
+        # Recent raw output activity is a stronger signal than turn state alone.
+        # This lets the watchdog treat in-flight text/audio as active even if the
+        # higher-level TTS/Bot state has not caught up yet.
+        self._last_output_activity_monotonic: float = 0.0
+        self._recent_output_activity_window_secs: float = 3.0
 
         # Initial greeting detection
         self._on_greeting_done = on_greeting_done
@@ -197,9 +207,32 @@ class TurnGate(FrameProcessor):
         self._turn_transcript_parts = []
         self._tts_started = False
         self._bot_speaking = False
+        self._last_output_activity_monotonic = 0.0
         if self._turn_end_task and not self._turn_end_task.done():
             self._turn_end_task.cancel()
             self._turn_end_task = None
+        if self._no_response_check_task and not self._no_response_check_task.done():
+            self._no_response_check_task.cancel()
+            self._no_response_check_task = None
+
+    def has_response_activity(self) -> bool:
+        """Return True when the model has started producing output for this turn."""
+        recent_output_activity = (
+            self._last_output_activity_monotonic > 0
+            and (time.monotonic() - self._last_output_activity_monotonic)
+            <= self._recent_output_activity_window_secs
+        )
+        return bool(
+            self._bot_speaking
+            or self._tts_started
+            or self._pending_transcript is not None
+            or self._turn_transcript_parts
+            or recent_output_activity
+        )
+
+    def _mark_output_activity(self):
+        """Record recent downstream output and stop the no-response timer."""
+        self._last_output_activity_monotonic = time.monotonic()
         if self._no_response_check_task and not self._no_response_check_task.done():
             self._no_response_check_task.cancel()
             self._no_response_check_task = None
@@ -239,8 +272,9 @@ class TurnGate(FrameProcessor):
         """Check if model never responded after user stopped speaking."""
         try:
             await asyncio.sleep(self._no_response_timeout)
-            # If no TTS started and bot never spoke, model didn't respond at all
-            if not self._tts_started and not self._bot_speaking:
+            # Treat any downstream text/audio activity as a valid response, even if
+            # the coarser TTS/bot state has not updated yet.
+            if not self.has_response_activity():
                 logger.warning(
                     f"[NO_RESPONSE] No TTS response after {self._no_response_timeout}s"
                 )
@@ -252,6 +286,21 @@ class TurnGate(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Watch for TTS and Bot speaking frames to manage turn advancement."""
         await super().process_frame(frame, direction)
+
+        # Raw downstream output is the most reliable "model is actively responding"
+        # signal. Track it directly so watchdogs do not race against delayed
+        # BotStopped/TTS bookkeeping.
+        if isinstance(
+            frame,
+            (
+                BotSpeakingFrame,
+                BotStartedSpeakingFrame,
+                LLMTextFrame,
+                TTSAudioRawFrame,
+                TTSTextFrame,
+            ),
+        ):
+            self._mark_output_activity()
 
         # allow_interruptions=False should prevent this, but log if it still
         # arrives via a Pipecat internal edge case.
@@ -509,6 +558,8 @@ class RealtimePipeline(BasePipeline):
         # is emitted and the TurnGate's no-response timer never starts.
         self._turn_watchdog_task: Optional[asyncio.Task] = None
         self._turn_watchdog_timeout: float = 30.0  # seconds after audio ends
+        self._turn_watchdog_extension_secs: float = 20.0
+        self._turn_watchdog_max_extensions: int = 6
         # Event to signal when pipeline is ready (StartFrame has reached end)
         self._pipeline_ready_event: asyncio.Event = asyncio.Event()
         # Event to signal when initial greeting starts (first BotStartedSpeakingFrame)
@@ -557,6 +608,82 @@ class RealtimePipeline(BasePipeline):
             return False
         m = self.model_name.lower()
         return "grok" in m and "realtime" in m
+
+    def _use_manual_rehydrate_response_input(self) -> bool:
+        """Use structured response.create(input=...) rehydration for OpenAI Realtime.
+
+        This requires disabling server VAD so we can manually issue response.create after
+        the input audio buffer is committed and reference the committed audio item.
+        """
+        return bool(
+            self._rehydration_turns
+            and self._disable_vad
+            and self._is_openai_realtime()
+            and (self.service_name or "").lower() == "openai-realtime"
+        )
+
+    @staticmethod
+    def _build_realtime_rehydration_input(golden_turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Build structured Realtime input items from golden turns.
+
+        The output is suitable for ``response.create.response.input`` and preserves
+        user/assistant/tool chronology for prompt-free rehydration.
+        """
+        items: list[dict[str, Any]] = []
+
+        for turn_index, turn in enumerate(golden_turns):
+            user_input = turn.get("input", "")
+            golden_text = turn.get("golden_text", "")
+            required_calls = turn.get("required_function_call")
+            tool_responses = turn.get("function_call_response")
+
+            items.append(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": user_input}],
+                }
+            )
+
+            calls = required_calls if isinstance(required_calls, list) else [required_calls] if required_calls else []
+            responses = (
+                tool_responses
+                if isinstance(tool_responses, list)
+                else [tool_responses] if tool_responses is not None else []
+            )
+
+            for call_index, call in enumerate(calls):
+                call_id = f"rehydrate_call_t{turn_index}_{call_index}"
+                items.append(
+                    {
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": call["name"],
+                        "arguments": json.dumps(call.get("args", {})),
+                    }
+                )
+                if call_index < len(responses):
+                    items.append(
+                        {
+                            "type": "function_call_output",
+                            "status": "completed",
+                            "call_id": call_id,
+                            "output": json.dumps(responses[call_index]),
+                        }
+                    )
+
+            items.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": golden_text}],
+                }
+            )
+
+        return items
 
     def _get_audio_duration(self, audio_path: str) -> float:
         """Get duration of an audio file in seconds.
@@ -620,14 +747,18 @@ class RealtimePipeline(BasePipeline):
             if not api_key:
                 raise EnvironmentError("OPENAI_API_KEY environment variable is required")
 
+            turn_detection: rt_events.TurnDetection | bool = rt_events.TurnDetection(
+                type="server_vad",
+                threshold=0.7,
+                prefix_padding_ms=500,
+                silence_duration_ms=800,
+            )
+            if self._disable_vad:
+                turn_detection = False
+
             audio_config = rt_events.AudioConfiguration(
                 input=rt_events.AudioInput(
-                    turn_detection=rt_events.TurnDetection(
-                        type="server_vad",
-                        threshold=0.7,
-                        prefix_padding_ms=500,
-                        silence_duration_ms=800,
-                    )
+                    turn_detection=turn_detection
                 )
             )
             session_props = rt_events.SessionProperties(
@@ -649,6 +780,16 @@ class RealtimePipeline(BasePipeline):
             if "ExplicitToolResult" in class_name:
                 kwargs["on_reconnecting"] = self._on_ws_reconnecting
                 kwargs["on_reconnected"] = self._on_ws_reconnected
+                if self._use_manual_rehydrate_response_input():
+                    rehydration_input_prefix = self._build_realtime_rehydration_input(
+                        self._rehydration_turns or []
+                    )
+                    kwargs["enable_manual_rehydrate_response_input"] = True
+                    kwargs["rehydration_input_prefix"] = rehydration_input_prefix
+                    logger.info(
+                        f"[Rehydration] Using structured response.create input with "
+                        f"{len(rehydration_input_prefix)} prior items"
+                    )
             return service_class(**kwargs)
         elif "UltravoxRealtime" in class_name:
             # Ultravox Realtime: Use OneShotInputParams
@@ -701,14 +842,20 @@ class RealtimePipeline(BasePipeline):
         system_instruction = getattr(self.benchmark, "system_instruction", "")
         tools = getattr(self.benchmark, "tools_schema", None)
 
-        # In rehydration mode, enrich the system instruction with golden history
-        # (same strategy as reconnection-based context preservation).
-        if self._rehydration_turns:
+        # In rehydration mode, either:
+        # - use structured response.create(input=...) rehydration (manual mode), or
+        # - fall back to system-instruction hydration (legacy path / server-VAD mode).
+        if self._rehydration_turns and not self._use_manual_rehydrate_response_input():
             _, instruction_suffix = self.build_rehydration_history(self._rehydration_turns)
             system_instruction = system_instruction + instruction_suffix
             logger.info(
                 f"[Rehydration] Enriched system instruction with {len(self._rehydration_turns)} "
                 f"golden turns ({len(system_instruction)} chars total)"
+            )
+        elif self._use_manual_rehydrate_response_input():
+            logger.info(
+                f"[Rehydration] Using response.create(input=...) hydration; "
+                f"system instruction remains base prompt ({len(system_instruction)} chars)"
             )
 
         # Both OpenAI Realtime and Gemini Live read the system instruction from
@@ -930,15 +1077,33 @@ class RealtimePipeline(BasePipeline):
             self._turn_watchdog_task = None
 
     async def _turn_watchdog(self, timeout: float, expected_turn: int):
-        """Watchdog: if turn hasn't advanced after timeout, trigger empty response."""
+        """Watchdog: if turn stalls without model output, trigger empty response.
+
+        Some realtime turns legitimately run long (streamed text/audio and
+        delayed BotStoppedSpeakingFrame). When we detect active output, extend
+        instead of force-retrying immediately.
+        """
+        extension_interval = self._turn_watchdog_extension_secs
+        max_extensions = self._turn_watchdog_max_extensions
         try:
             await asyncio.sleep(timeout)
-            if self.turn_idx == expected_turn and not self.done:
+            extensions = 0
+            while self.turn_idx == expected_turn and not self.done:
+                has_activity = bool(self.turn_gate and self.turn_gate.has_response_activity())
+                if has_activity and extensions < max_extensions:
+                    extensions += 1
+                    logger.info(
+                        f"[TURN_WATCHDOG] Turn {expected_turn}: output still active; "
+                        f"extending watchdog ({extensions}/{max_extensions})"
+                    )
+                    await asyncio.sleep(extension_interval)
+                    continue
                 logger.warning(
                     f"[TURN_WATCHDOG] Turn {expected_turn} did not advance within "
-                    f"{timeout:.1f}s — triggering empty response"
+                    f"{timeout + extensions * extension_interval:.1f}s — triggering empty response"
                 )
                 self._on_empty_response("no_response")
+                break
         except asyncio.CancelledError:
             pass
 
@@ -984,11 +1149,21 @@ class RealtimePipeline(BasePipeline):
             audio_in_passthrough=True,
             vad_analyzer=user_vad,
         )
+        emit_user_stopped_speaking = bool(
+            self._disable_vad
+            and self._is_openai_realtime()
+            and (self.service_name or "").lower() == "openai-realtime"
+        )
         self.paced_input = PacedInputTransport(
             input_params,
             pre_roll_ms=100,
             continuous_silence=True,
+            emit_user_stopped_speaking=emit_user_stopped_speaking,
         )
+        if emit_user_stopped_speaking:
+            logger.info(
+                "[PacedInput] emit_user_stopped_speaking enabled for OpenAI Realtime with --disable-vad"
+            )
 
         # Create transcript processors
         self.transcript = TranscriptProcessor()
@@ -1226,7 +1401,11 @@ class RealtimePipeline(BasePipeline):
             else:
                 logger.info(
                     f"[Pipeline] Rehydration mode — skipping greeting, proceeding to audio "
-                    f"({len(self._rehydration_turns)} golden turns in system prompt)"
+                    + (
+                        f"({len(self._rehydration_turns)} golden turns via response.create input)"
+                        if self._use_manual_rehydrate_response_input()
+                        else f"({len(self._rehydration_turns)} golden turns in system prompt)"
+                    )
                 )
         else:
             # Trigger initial greeting for models that need explicit ResponseCreateEvent.
@@ -1363,6 +1542,14 @@ class RealtimePipeline(BasePipeline):
                 # OpenAI Realtime fallback
                 self.context.add_messages([{"role": "user", "content": turn["input"]}])
                 await self.task.queue_frames([LLMRunFrame()])
+
+    async def _cleanup_after_run(self) -> None:
+        """Stop watchdogs and feeder threads for one-turn rehydrated runs."""
+        self._cancel_turn_watchdog()
+        if self.turn_gate is not None:
+            self.turn_gate.clear_pending()
+        if self.paced_input is not None:
+            self.paced_input.shutdown_feeder()
 
     async def _on_turn_end(self, assistant_text: str) -> None:
         """Override to wait for user audio to finish before advancing turn.

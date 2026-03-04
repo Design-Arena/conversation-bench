@@ -55,6 +55,7 @@ class BasePipeline(ABC):
         self.llm: Optional[FrameProcessor] = None
         self.model_name: Optional[str] = None
         self.service_name: Optional[str] = None
+        self._disable_vad: bool = False
         self._turn_indices: Optional[List[int]] = None
         # Golden turns to inject as context before the target turn (single-step rehydration)
         self._rehydration_turns: Optional[List[Dict[str, Any]]] = None
@@ -138,6 +139,7 @@ class BasePipeline(ABC):
         service_name: Optional[str] = None,
         turn_indices: Optional[List[int]] = None,
         rehydration_turns: Optional[List[Dict[str, Any]]] = None,
+        disable_vad: bool = False,
     ) -> None:
         """Run the complete benchmark. Pipeline handles everything internally.
 
@@ -151,12 +153,14 @@ class BasePipeline(ABC):
                 When set, the pipeline runs in single-step rehydration mode: the golden
                 history is injected into the model context, and only the target turn(s)
                 specified by ``turn_indices`` are executed live.
+            disable_vad: Disable server-side VAD for compatible realtime pipelines.
         """
         self.recorder = recorder
         self.model_name = model
         self.service_name = service_name  # Store for use in _create_llm overrides
         self._turn_indices = turn_indices
         self._rehydration_turns = rehydration_turns
+        self._disable_vad = disable_vad
 
         # Create LLM service
         self.llm = self._create_llm(service_class, model)
@@ -172,7 +176,14 @@ class BasePipeline(ABC):
         # Queue first turn and run
         await self._queue_first_turn()
         runner = PipelineRunner(handle_sigint=True)
-        await runner.run(self.task)
+        try:
+            await runner.run(self.task)
+        finally:
+            await self._cleanup_after_run()
+
+    async def _cleanup_after_run(self) -> None:
+        """Hook for pipeline-specific shutdown cleanup after runner exit."""
+        pass
 
     def _get_actual_turn_index(self, effective_index: int) -> int:
         """Convert effective turn index to actual turn index."""
