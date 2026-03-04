@@ -799,9 +799,25 @@ class RealtimePipeline(BasePipeline):
                     "ULTRAVOX_API_KEY environment variable is required"
                 )
 
+            # Ultravox reads its system prompt only from OneShotInputParams at
+            # construction time — it does NOT pick up later LLMContext updates.
+            # Enrich the prompt with rehydration history here so the model sees
+            # the golden conversation context before the target turn's audio.
+            effective_prompt = system_instruction
+            if self._rehydration_turns:
+                _, instruction_suffix = self.build_rehydration_history(
+                    self._rehydration_turns
+                )
+                effective_prompt = system_instruction + instruction_suffix
+                logger.info(
+                    f"[Rehydration/Ultravox] Enriched OneShotInputParams system_prompt "
+                    f"with {len(self._rehydration_turns)} golden turns "
+                    f"({len(effective_prompt)} chars total)"
+                )
+
             params = OneShotInputParams(
                 api_key=api_key,
-                system_prompt=system_instruction,
+                system_prompt=effective_prompt,
                 temperature=1.0,
                 model=model,
             )

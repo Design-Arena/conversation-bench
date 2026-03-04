@@ -56,6 +56,8 @@ turns = [
  'audio_file': 'audio/turn_002.wav'},
 
 # Turn 3 — Vague pronoun: "make that two" → model must infer flour
+# Subtotal ($13.98) is intentionally required: numerical_reasoning is scored,
+# and the golden response validates the model can compute 2 × $6.99.
 {'input': "Actually, make that two.",
  'golden_text': "Updated to two bags of All-Purpose Flour — thirteen "
                 "ninety-eight for the flour.",
@@ -130,6 +132,8 @@ turns = [
  'audio_file': 'audio/turn_008.wav'},
 
 # Turn 9 — Maple syrup (similar name to maple candy — disambiguation later)
+# Judge should accept broader queries like "maple" that still return the
+# correct item; handled via semantic-equivalence rule in the judge prompt.
 {'input': "OK good. Now I need maple syrup.",
  'golden_text': "Maple Syrup, Grade A, twelve-ounce bottle for nine "
                 "ninety-nine. Added.",
