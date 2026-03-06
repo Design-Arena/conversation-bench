@@ -42,13 +42,13 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-JUDGE_VERSION = "claude-agent-sdk-v9-tool-flexibility-and-contradiction"
-REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v9-rehydrated-no-realignment-state-absorbs-tool-penalty"
+JUDGE_VERSION = "claude-agent-sdk-v11-dedup-golden-ref-sanity-check"
+REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v11-rehydrated-dedup-golden-ref-sanity-check"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
 JUDGE_SYSTEM_PROMPT = """# Role
-You are an expert evaluator for conversational AI systems. You will judge a multi-turn conversation between a user and an AI assistant for the AI Engineer World's Fair 2025.
+You are an expert evaluator for conversational AI systems. You will judge a multi-turn conversation between a user and an AI voice assistant.
 
 # CRITICAL: Evaluate ALL Turns
 
@@ -93,7 +93,7 @@ For each turn, evaluate SIX dimensions:
    - FALSE if a function call was expected, not made, and NOT already made earlier (and none of the above absorption rules apply)
    - FALSE if the assistant's words imply waiting for confirmation but it acts without waiting (words-actions mismatch)
    - For argument matching, use semantic equivalence (not verbatim)
-   - Session IDs must match exactly
+   - IDs must match exactly (session IDs, appointment IDs, cart IDs, order IDs, etc.)
    - Set to NULL for turns where no function call is expected
 
 3. **instruction_following** (bool):
@@ -102,16 +102,21 @@ For each turn, evaluate SIX dimensions:
    - TRUE if the turn is part of a realigned workflow that still accomplishes the goal
    - TRUE if assistant engaged appropriately but did not call a required function (score the missing/wrong call only under tool_use_correct)
    - TRUE if the turn asks about an action that never happened due to a cascade failure (see Cascade Absorption) and the assistant reasonably indicates it doesn't have that information
-   - FALSE only if assistant's words explicitly contradict its actions in a non-tool sense (e.g. says "I'll wait for your confirmation" but then calls the function in the same turn)
+   - FALSE if assistant's words explicitly contradict its actions in a non-tool sense (e.g. says "I'll wait for your confirmation" but then calls the function in the same turn)
    - FALSE if assistant neither answers nor advances the workflow in any way (irrelevant, no meaningful engagement)
+   - FALSE if the assistant only partially answers a multi-part question, omitting a substantive component (e.g., user asks to book AND confirm the math, but assistant only books)
+   - FALSE if the assistant omits information that the golden response considers essential to a complete answer (e.g., updated totals, cost breakdowns, arithmetic confirmations)
+   - **Numerical reasoning / arithmetic:** When a turn involves counting, arithmetic, or totals, the correctness of that reasoning is judged under instruction_following. Wrong math or missing math is an instruction_following failure.
    - **Do NOT fail instruction_following** solely because the assistant didn't call a tool when expected, called the wrong tool, or asked for confirmation instead of calling. Those are scored only under tool_use_correct.
    - **IMPORTANT**: If a turn has turn_taking=FALSE, be lenient on instruction_following since garbled audio may cause transcription issues
 
 4. **kb_grounding** (bool):
-   - TRUE unless assistant states an explicit factual error
-   - TRUE if assistant provides additional correct information
+   - The Knowledge Base (provided at the top of the input) is the source of truth for factual grounding, NOT the golden text alone
+   - TRUE if the assistant's response is factually consistent with the Knowledge Base
+   - TRUE if the assistant provides additional correct details from the Knowledge Base that go beyond the golden text — do NOT penalize this
    - TRUE if the turn depends on an action that never executed due to a cascade failure and the assistant does not fabricate information about that action
-   - FALSE only for clear factual contradictions (wrong dates, times, locations, speakers)
+   - FALSE only for clear factual contradictions with the Knowledge Base (wrong dates, times, locations, speakers, prices, names)
+   - FALSE if the assistant states facts that are neither in the Knowledge Base nor in the golden text (hallucination)
 
 5. **ambiguity_handling** (bool):
    - ONLY scored for turns where "Score Dimensions" includes "ambiguity_handling"
@@ -181,16 +186,37 @@ FAIL instruction_following only when the assistant's text implies one behavior a
 
 **NOT a mismatch**: The assistant calls the correct function with correct arguments, gets an error back (e.g. SLOT_TAKEN), and reports that error to the user. The speech reflects the tool result, not a contradiction. Score tool_use_correct=TRUE, instruction_following=TRUE.
 
-**Contradictory narration after successful tool call**: If the assistant makes a correct tool call that returns success, but the spoken text tells the user the action could NOT be completed, failed, or was not performed, this IS a words-actions mismatch. The tool call gets credit (tool_use_correct=TRUE), but the spoken response is misleading → instruction_following=FALSE. Example: assistant calls update_event successfully, but says "I wasn't able to update the phone number" → tool_use_correct=TRUE, instruction_following=FALSE.
+**Contradictory narration after successful tool call**: If the assistant makes a correct tool call that returns success, but the spoken text contradicts that success in any of the following ways, this IS a words-actions mismatch. The tool call gets credit (tool_use_correct=TRUE), but the spoken response is misleading → instruction_following=FALSE.
+
+Three sub-patterns to watch for:
+
+1. **Explicit failure claim**: The spoken text says the action could NOT be completed, failed, or was not performed, even though the tool returned success. Example: assistant calls update_event successfully, but says "I wasn't able to update the phone number" → tool_use_correct=TRUE, instruction_following=FALSE.
+
+2. **Post-action permission seeking**: The spoken text asks the user for permission or confirmation to perform an action that was ALREADY completed via tool call in the same turn. Example: assistant calls update_event(field='date', new_value='2025-03-15') successfully, then says "Would you like me to move the event to March 15th?" or "Shall I go ahead and update the date?" → tool_use_correct=TRUE, instruction_following=FALSE. Similarly, assistant calls request_tech_support successfully, then asks "What is the issue you'd like me to report?" → tool_use_correct=TRUE, instruction_following=FALSE.
+
+3. **Ignoring successful tool results**: The tool call succeeds and returns data (e.g., order items, booking details, search results), but the spoken text claims the information could not be retrieved, or omits the data the user explicitly asked for. Example: assistant calls verify_details successfully and the tool returns a full list of 16 order items, but the assistant says "I wasn't able to retrieve the order details" or simply does not read back the items when the user asked for them → tool_use_correct=TRUE, instruction_following=FALSE.
+
+Apply all three sub-patterns consistently. If the assistant's spoken response falls into ANY of these patterns after a successful tool call, fail instruction_following regardless of how the rest of the response is phrased.
+
+**Post-evaluation sanity check for every turn with a tool call**: After scoring a turn, re-read the assistant_text one more time and ask: "Does the spoken text contradict, ignore, or undermine the tool result?" If yes and you scored instruction_following=TRUE, reconsider. This check catches false passes that slip through on first read.
 
 # Critical: Tool Call Argument Flexibility
 
 When evaluating tool_use_correct, apply these principles consistently:
 
 - **Extra compatible arguments**: If the assistant calls the expected function with all required arguments AND adds additional arguments that are consistent with the conversation context (e.g., adding `doctor` or `time_preference` alongside a required `date` parameter), treat the call as correct. Do not fail tool_use_correct solely because extra compatible arguments were included—only fail if the extra arguments conflict with or distort the expected behavior.
-- **Broader search queries**: For lookup/search-type functions, if the assistant uses a broader query term that still returns the correct result (e.g., `query="maple"` when the expected query is `query="maple syrup"`), treat the call as semantically equivalent. The key question is whether the query would match the intended item, not whether it is verbatim identical. Conversely, a query that is so broad it would match the wrong item should still be failed.
+- **Broader search queries**: For lookup/search-type functions, if the assistant uses a broader query term that still returns the correct result (e.g., `query="maple"` when the expected query is `query="maple syrup"`, or `query="sourdough"` when expected is `query="sourdough loaf"`), treat the call as semantically equivalent. The key question is whether the query would match the intended item, not whether it is verbatim identical. Conversely, a query that is so broad it would match the wrong item should still be failed.
+- **Narrower but correct queries**: Similarly, if the assistant uses a more specific query that still matches the intended item (e.g., `query="organic free range eggs"` when expected is `query="organic eggs"`), treat as correct as long as the result would be the same item.
 
 Apply both principles consistently across all runs of the same turn.
+
+# Critical: Golden Text Is a Reference, Not a Required Script
+
+The golden_text is the *ideal* response for evaluation purposes. Apply these principles consistently:
+- **Core vs. embellishment**: Identify the core test of each turn (e.g., correcting a false presupposition, providing the right price, making the right tool call). Pass instruction_following and kb_grounding when the core test passes, even if the assistant omits supplementary details that the golden includes.
+- **Extra correct details**: Do NOT fail an assistant for adding correct details from the KB that go beyond the golden text (e.g., mentioning a clinic address, parking info, or a related event). Only fail kb_grounding if the extra detail is factually wrong.
+- **Missing optional details**: When the golden text includes supplementary facts beyond what the user directly asked (e.g., room number when user asked about time, or a related event on a different day), do NOT require the assistant to include those unless they are essential to answering the user's actual question.
+- **Consistency**: Apply the same tolerance for extra/missing details across all runs of the same turn. If a supplementary detail is optional in one run, it must be optional in all runs.
 
 # Critical: Handling Early Function Calls
 
@@ -401,6 +427,7 @@ def format_turns_for_judge(
     only_turns: Optional[set[int]] = None,
     turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None,
     get_relevant_dimensions_fn=None,
+    kb_text: Optional[str] = None,
 ) -> str:
     """Format conversation turns with full context for realignment analysis.
 
@@ -411,8 +438,18 @@ def format_turns_for_judge(
         turn_taking_data: Optional dict mapping turn index to turn-taking analysis
         get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
             If not provided, falls back to conversation_bench.
+        kb_text: Optional knowledge base text. When provided, prepended as a reference
+            section so the judge can verify kb_grounding against the actual source of truth.
     """
     lines = []
+
+    if kb_text:
+        lines.append("# Knowledge Base (Source of Truth for KB Grounding)")
+        lines.append("")
+        lines.append(kb_text.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
 
     # First, provide turn-taking failure summary if any
     if turn_taking_data:
@@ -538,6 +575,7 @@ async def judge_with_claude(
     expected_turns: Optional[List[Dict[str, Any]]] = None,
     skip_turn_taking: bool = False,
     get_relevant_dimensions_fn=None,
+    kb_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Main judging function using mode-aware scoring.
 
@@ -548,6 +586,7 @@ async def judge_with_claude(
         expected_turns: Optional list of expected turns. If not provided, imports from turns module.
         skip_turn_taking: If True, skip turn-taking analysis (for runs without WAV files)
         get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
+        kb_text: Optional knowledge base text for kb_grounding verification.
 
     Returns:
         Dict with judgments, realignment_notes, function_tracking, turn_taking_analysis, summary, and model_name.
@@ -600,8 +639,11 @@ async def judge_with_claude(
                 if debug:
                     print(f"Turn-taking analysis failed: {e}", file=sys.stderr)
 
-    # Format turns (with turn-taking data if available)
-    formatted_turns = format_turns_for_judge(records, expected_turns, only_turns, turn_taking_data, get_relevant_dimensions_fn)
+    # Format turns (with turn-taking data and KB if available)
+    formatted_turns = format_turns_for_judge(
+        records, expected_turns, only_turns, turn_taking_data,
+        get_relevant_dimensions_fn, kb_text=kb_text,
+    )
 
     prompt = build_judge_user_prompt(formatted_turns, len(records), cross_turn_realignment)
     system_prompt = build_judge_system_prompt(cross_turn_realignment)

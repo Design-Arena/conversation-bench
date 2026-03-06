@@ -51,7 +51,7 @@ June 5: Reasoning + RL, SWE-Agents, Evals, Retrieval + Search, Security, Generat
 
 ### Gemini Workshops
 - **Session ID: 916110**
-  - **Speaker:** Shrestha Basu Mallick (Developer Advocate, Gemini API)
+  - **Speakers:** Shrestha Basu Mallick (Developer Advocate, Gemini API) & Kwindla Kramer (Co-founder & CEO, Daily)
   - **Time:** 10:40 AM
   - **Title:** Building Voice Agents with Gemini and Pipecat
   - **Track:** Voice
@@ -63,14 +63,6 @@ June 5: Reasoning + RL, SWE-Agents, Evals, Retrieval + Search, Security, Generat
   - **Title:** AI Engineering with the Google Gemini 2.5 Model Family
   - **Track:** AI in Action
   - **Room:** SOMA: Workshops
-
-### Other Workshops
-- **Session ID: 916110**
-  - **Speaker:** Kwindla Kramer (Co-founder & CEO, Daily)
-  - **Time:** 10:40 AM
-  - **Title:** Building Voice Agents with Gemini and Pipecat
-  - **Track:** Voice
-  - **Room:** Salons 2-6: Workshops
 
 ## MCP TRACK (June 4)
 

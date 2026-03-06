@@ -585,6 +585,10 @@ def judge(
         click.echo(f"Could not load benchmark '{benchmark_name}', using shared turns module")
         from benchmarks.conversation_bench.turns import turns as expected_turns
 
+    # Load knowledge base for kb_grounding verification
+    kb_path = Path("benchmarks") / benchmark_name / "data" / "knowledge_base.txt"
+    kb_text = kb_path.read_text(encoding="utf-8") if kb_path.exists() else None
+
     # Load shared utilities
     from audio_arena.judging.llm_judge import load_transcript, write_outputs
 
@@ -606,6 +610,7 @@ def judge(
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
                     model=judge_model,
+                    kb_text=kb_text,
                 )
             )
         except Exception as e:
@@ -640,6 +645,7 @@ def judge(
                     expected_turns=expected_turns,
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+                    kb_text=kb_text,
                 )
             )
         except Exception as e:
