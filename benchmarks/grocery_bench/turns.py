@@ -647,7 +647,7 @@ CATEGORY_DIMENSIONS = {
     'error_recovery':       ['state_tracking'],
 
     'ambiguous_entity':     ['ambiguity_handling'],
-    'numerical_reasoning':  ['ambiguity_handling'],
+    'numerical_reasoning':  [],
 
     'basic_qa':             [],
     'tool_use':             [],
